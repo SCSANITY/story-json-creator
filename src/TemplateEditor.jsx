@@ -1,4 +1,5 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from "react";
+import JSZip from "jszip";
 
 const CANVAS_WIDTH = 720;
 const MIN_BOX_WIDTH = 220;
@@ -25,111 +26,144 @@ const copyToClipboard = async (text) => {
 };
 
 const FONT_OPTIONS = [
-  // ── Title Display / 大标题专用 ★ ─────────────────────────────────────────
-  { label: "Cinzel Decorative",    value: "'Cinzel Decorative', cursive",     group: "title" },
-  { label: "UnifrakturMaguntia",   value: "'UnifrakturMaguntia', cursive",    group: "title" },
-  { label: "Rye",                  value: "'Rye', cursive",                   group: "title" },
-  { label: "Metamorphous",         value: "'Metamorphous', cursive",          group: "title" },
-  { label: "Rozha One",            value: "'Rozha One', serif",               group: "title" },
-  { label: "Oswald",               value: "'Oswald', sans-serif",             group: "title" },
-  { label: "Russo One",            value: "'Russo One', sans-serif",          group: "title" },
-  { label: "Raleway",              value: "'Raleway', sans-serif",            group: "title" },
-  { label: "Bangers",              value: "'Bangers', cursive",               group: "title" },
-  { label: "Poiret One",           value: "'Poiret One', cursive",            group: "title" },
-  { label: "Anton",                value: "'Anton', sans-serif",              group: "title" },
-  { label: "Orbitron",             value: "'Orbitron', sans-serif",           group: "title" },
-  { label: "Press Start 2P",       value: "'Press Start 2P', cursive",        group: "title" },
-  { label: "Permanent Marker",     value: "'Permanent Marker', cursive",      group: "title" },
-  { label: "Black Ops One",        value: "'Black Ops One', cursive",         group: "title" },
-  { label: "Alfa Slab One",        value: "'Alfa Slab One', cursive",         group: "title" },
-  { label: "Italiana",             value: "'Italiana', serif",                group: "title" },
-  { label: "Fugaz One",            value: "'Fugaz One', cursive",             group: "title" },
-  { label: "Luckiest Guy",         value: "'Luckiest Guy', cursive",          group: "title" },
-  { label: "Nunito",               value: "'Nunito', sans-serif",             group: "title" },
-  { label: "Poppins",              value: "'Poppins', sans-serif",            group: "title" },
-  { label: "Passion One",          value: "'Passion One', cursive",           group: "title" },
-  { label: "Rammetto One",         value: "'Rammetto One', cursive",          group: "title" },
-  { label: "Amatic SC",            value: "'Amatic SC', cursive",             group: "title" },
-  { label: "Caveat",               value: "'Caveat', cursive",                group: "title" },
-  { label: "Gloria Hallelujah",    value: "'Gloria Hallelujah', cursive",     group: "title" },
-  { label: "Josefin Sans",         value: "'Josefin Sans', sans-serif",       group: "title" },
-  { label: "Comfortaa",            value: "'Comfortaa', cursive",             group: "title" },
+  // ── 📖 Classic Serif — 故事书衬线 ────────────────────────────────────────────
+  { label: "Lora",               value: "'Lora', serif",               group: "serif" },
+  { label: "EB Garamond",        value: "'EB Garamond', serif",        group: "serif" },
+  { label: "Cormorant Garamond", value: "'Cormorant Garamond', serif", group: "serif" },
+  { label: "Fraunces",           value: "'Fraunces', serif",           group: "serif" },
+  { label: "DM Serif Display",   value: "'DM Serif Display', serif",   group: "serif" },
+  { label: "Spectral",           value: "'Spectral', serif",           group: "serif" },
+  { label: "IM Fell English",    value: "'IM Fell English', serif",    group: "serif" },
+  { label: "Gambetta",           value: "'Gambetta', serif",           group: "serif" },
 
-  // ── Fantasy / Storybook (奇幻 · 故事书风) ──────────────────────────────────
-  { label: "Cinzel",              value: "'Cinzel', serif",                group: "fantasy" },
-  { label: "Playfair Display",    value: "'Playfair Display', serif",       group: "fantasy" },
-  { label: "Cormorant Garamond",  value: "'Cormorant Garamond', serif",     group: "fantasy" },
-  { label: "IM Fell English",     value: "'IM Fell English', serif",        group: "fantasy" },
-  { label: "Uncial Antiqua",      value: "'Uncial Antiqua', cursive",       group: "fantasy" },
-  { label: "MedievalSharp",       value: "'MedievalSharp', serif",          group: "fantasy" },
-  { label: "Jim Nightshade",      value: "'Jim Nightshade', cursive",       group: "fantasy" },
-  { label: "Philosopher",         value: "'Philosopher', serif",            group: "fantasy" },
+  // ── 🎨 Modern Design — 设计感 ────────────────────────────────────────────────
+  { label: "Montserrat",         value: "'Montserrat', sans-serif",    group: "modern" },
+  { label: "Poppins",            value: "'Poppins', sans-serif",       group: "modern" },
+  { label: "Raleway",            value: "'Raleway', sans-serif",       group: "modern" },
+  { label: "Space Grotesk",      value: "'Space Grotesk', sans-serif", group: "modern" },
+  { label: "Syne",               value: "'Syne', sans-serif",          group: "modern" },
+  { label: "Unbounded",          value: "'Unbounded', sans-serif",     group: "modern" },
+  { label: "Outfit",             value: "'Outfit', sans-serif",        group: "modern" },
 
-  // ── Cute / Children's Book (可爱 · 儿童书风) ──────────────────────────────
-  { label: "Fredoka One",         value: "'Fredoka One', cursive",          group: "cute" },
-  { label: "Chewy",               value: "'Chewy', cursive",                group: "cute" },
-  { label: "Bubblegum Sans",      value: "'Bubblegum Sans', cursive",       group: "cute" },
-  { label: "Boogaloo",            value: "'Boogaloo', cursive",             group: "cute" },
-  { label: "Lilita One",          value: "'Lilita One', cursive",           group: "cute" },
-  { label: "Baloo 2",             value: "'Baloo 2', cursive",              group: "cute" },
-  { label: "Pacifico",            value: "'Pacifico', cursive",             group: "cute" },
-  { label: "Righteous",           value: "'Righteous', sans-serif",         group: "cute" },
+  // ── ✨ Elegant Display — 典雅大标题 ───────────────────────────────────────────
+  { label: "Cinzel",             value: "'Cinzel', serif",             group: "elegant" },
+  { label: "Cinzel Decorative",  value: "'Cinzel Decorative', serif",  group: "elegant" },
+  { label: "Playfair Display",   value: "'Playfair Display', serif",   group: "elegant" },
+  { label: "Bodoni Moda",        value: "'Bodoni Moda', serif",        group: "elegant" },
+  { label: "Josefin Sans",       value: "'Josefin Sans', sans-serif",  group: "elegant" },
+  { label: "Italiana",           value: "'Italiana', serif",           group: "elegant" },
+  { label: "Yeseva One",         value: "'Yeseva One', cursive",       group: "elegant" },
+  { label: "Poiret One",         value: "'Poiret One', cursive",       group: "elegant" },
+  { label: "Boska",              value: "'Boska', serif",              group: "elegant" },
+  { label: "Zodiak",             value: "'Zodiak', serif",             group: "elegant" },
 
-  // ── Calligraphy / Script (书法 · 手写艺术) ────────────────────────────────
-  { label: "Great Vibes",         value: "'Great Vibes', cursive",          group: "script" },
-  { label: "Dancing Script",      value: "'Dancing Script', cursive",       group: "script" },
-  { label: "Kaushan Script",      value: "'Kaushan Script', cursive",       group: "script" },
-  { label: "Lobster",             value: "'Lobster', cursive",              group: "script" },
-  { label: "Sacramento",          value: "'Sacramento', cursive",           group: "script" },
-  { label: "Alex Brush",          value: "'Alex Brush', cursive",           group: "script" },
-  { label: "Satisfy",             value: "'Satisfy', cursive",              group: "script" },
-  { label: "Abril Fatface",       value: "'Abril Fatface', serif",          group: "script" },
+  // ── 🎪 Bold Title — 冲击标题字 ───────────────────────────────────────────────
+  { label: "Ultra",              value: "'Ultra', serif",              group: "title" },
+  { label: "Abril Fatface",      value: "'Abril Fatface', cursive",    group: "title" },
+  { label: "Russo One",          value: "'Russo One', sans-serif",     group: "title" },
+  { label: "Lobster Two",        value: "'Lobster Two', cursive",      group: "title" },
+  { label: "Pacifico",           value: "'Pacifico', cursive",         group: "title" },
+  { label: "Britney",            value: "'Britney', cursive",          group: "title" },
 
-  // ── Bold Display / Impact (强势标题 · 视觉冲击) ───────────────────────────
-  { label: "Bebas Neue",          value: "'Bebas Neue', cursive",           group: "display" },
-  { label: "Yeseva One",          value: "'Yeseva One', serif",             group: "display" },
-  { label: "Titan One",           value: "'Titan One', cursive",            group: "display" },
+  // ── 🚀 Space & Tech — 太空科技 ────────────────────────────────────────────────
+  { label: "Orbitron",           value: "'Orbitron', sans-serif",      group: "space" },
+  { label: "Rajdhani",           value: "'Rajdhani', sans-serif",      group: "space" },
 
-  // ── Body / Subtitle (正文 · 故事内文) ─────────────────────────────────────
-  { label: "Lora",                value: "'Lora', serif",                   group: "body" },
-  { label: "Merriweather",        value: "'Merriweather', serif",           group: "body" },
-  { label: "Georgia",             value: "Georgia, serif",                  group: "body" },
-  { label: "Times New Roman",     value: "'Times New Roman', serif",        group: "body" },
-  { label: "Garamond",            value: "Garamond, serif",                 group: "body" },
-  { label: "Palatino",            value: "Palatino, serif",                 group: "body" },
+  // ── 🧒 Cute & Rounded — 圆润可爱 ─────────────────────────────────────────────
+  { label: "Quicksand",          value: "'Quicksand', sans-serif",     group: "cute" },
+  { label: "Fredoka One",        value: "'Fredoka One', cursive",      group: "cute" },
+  { label: "Chewy",              value: "'Chewy', cursive",            group: "cute" },
+  { label: "Boogaloo",           value: "'Boogaloo', cursive",         group: "cute" },
+  { label: "Varela Round",       value: "'Varela Round', sans-serif",  group: "cute" },
+  { label: "Bubblegum Sans",     value: "'Bubblegum Sans', cursive",   group: "cute" },
 
-  // ── Sans-serif (无衬线) ────────────────────────────────────────────────────
-  { label: "Arial",               value: "Arial, sans-serif",               group: "sans" },
-  { label: "Verdana",             value: "Verdana, sans-serif",             group: "sans" },
-  { label: "Helvetica",           value: "Helvetica, sans-serif",           group: "sans" },
+  // ── 🔤 Unique & Artistic — 特效艺术字 ────────────────────────────────────────
+  { label: "UnifrakturMaguntia", value: "'UnifrakturMaguntia', cursive", group: "display" },
+  { label: "Permanent Marker",   value: "'Permanent Marker', cursive", group: "display" },
+  { label: "Cabin Sketch",       value: "'Cabin Sketch', cursive",     group: "display" },
+  { label: "Sharpie",            value: "'Sharpie', cursive",          group: "display" },
+  { label: "Inknut Antiqua",     value: "'Inknut Antiqua', serif",     group: "display" },
+
+  // ── ✍️ Script & Calligraphy — 书法手写 ───────────────────────────────────────
+  { label: "Kaushan Script",     value: "'Kaushan Script', cursive",   group: "script" },
+  { label: "Tangerine",          value: "'Tangerine', cursive",        group: "script" },
+  { label: "Satisfy",            value: "'Satisfy', cursive",          group: "script" },
+  { label: "Caveat",             value: "'Caveat', cursive",           group: "script" },
+  { label: "Dancing Script",     value: "'DancingScript', cursive",    group: "script" },
+  { label: "Kalam",              value: "'Kalam', cursive",            group: "script" },
 ];
 
 const COLOR_PRESETS = [
-  { name: "Gold gradient",    value: "gold_gradient",    preview: "linear-gradient(180deg, #F5D478, #C8922A, #F5E6A3, #A67620)" },
-  { name: "White",            value: "#FFFFFF",          preview: "#FFFFFF" },
-  { name: "Black",            value: "#000000",          preview: "#000000" },
-  { name: "Silver",           value: "silver_gradient",  preview: "linear-gradient(180deg, #FFFFFF, #888888, #F0F0F0, #585858)" },
-  { name: "Bronze",           value: "bronze_gradient",  preview: "linear-gradient(180deg, #FFD07A, #7A3E0E, #D4904A, #4A2006)" },
-  { name: "Rose gold",        value: "rosegold_gradient",preview: "linear-gradient(180deg, #FFD8C0, #B06040, #F0B898, #803828)" },
-  { name: "Custom",           value: "custom",           preview: "conic-gradient(red, orange, yellow, green, blue, purple, red)" },
+  { name: "Gold",        value: "gold_gradient",      preview: "linear-gradient(180deg, #F5D478, #C8922A, #F5E6A3, #A67620)" },
+  { name: "Silver",      value: "silver_gradient",    preview: "linear-gradient(180deg, #FFFFFF, #888888, #F0F0F0, #585858)" },
+  { name: "Bronze",      value: "bronze_gradient",    preview: "linear-gradient(180deg, #FFD07A, #7A3E0E, #D4904A, #4A2006)" },
+  { name: "Rose Gold",   value: "rosegold_gradient",  preview: "linear-gradient(180deg, #FFD8C0, #B06040, #F0B898, #803828)" },
+  { name: "Wood Grain",  value: "wood_gradient",      preview: "linear-gradient(180deg, #D4A96A, #8B5E3C, #E8C896, #5C3A1E)" },
+  { name: "Copper",      value: "copper_gradient",    preview: "linear-gradient(180deg, #E8A055, #7A4010, #F5C880, #4A2008)" },
+  { name: "Forest",      value: "forest_gradient",    preview: "linear-gradient(180deg, #7EC858, #1E5C2A, #B8E890, #0A3D18)" },
+  { name: "Jade",        value: "jade_gradient",      preview: "linear-gradient(180deg, #90D0A0, #1A6B3A, #C0E8C8, #0D4A22)" },
+  { name: "Ocean",       value: "ocean_gradient",     preview: "linear-gradient(180deg, #7EC8E3, #0A5C8C, #C5E8F5, #043E5C)" },
+  { name: "Midnight",    value: "midnight_gradient",  preview: "linear-gradient(180deg, #A0C4E8, #1A3A6B, #D8E8F8, #0A1E4A)" },
+  { name: "Amethyst",    value: "amethyst_gradient",  preview: "linear-gradient(180deg, #C89FE3, #6B3A9C, #E8D5F8, #4A1E78)" },
+  { name: "Ruby",        value: "ruby_gradient",      preview: "linear-gradient(180deg, #F5A0A0, #8B1010, #F8D0D0, #5A0808)" },
+  { name: "Coral",       value: "coral_gradient",     preview: "linear-gradient(180deg, #FF9B7A, #CC4030, #FFCBA8, #8B2018)" },
+  { name: "White",       value: "#FFFFFF",            preview: "#FFFFFF" },
+  { name: "Black",       value: "#000000",            preview: "#000000" },
+  { name: "Solid",       value: "custom",             preview: "conic-gradient(red, orange, yellow, green, blue, purple, red)" },
+  { name: "Gradient",    value: "custom_gradient",    preview: "linear-gradient(135deg, #FF8C00, #FFD700, #7B2FFF)" },
 ];
 
-// Maps preset gradient names → representative solid hex (used in JSON export only)
+// Maps preset gradient names → representative solid hex (used in JSON export + panel display)
 const GRADIENT_COLOR_MAP = {
-  gold_gradient:     "#C8922A",
-  silver_gradient:   "#A0A0A0",
-  bronze_gradient:   "#8B5E3C",
-  rosegold_gradient: "#C48888",
+  custom_gradient: "#FF8C00", // placeholder; actual value resolved per-item at export time
+  gold_gradient:      "#C8922A",
+  silver_gradient:    "#A0A0A0",
+  bronze_gradient:    "#8B5E3C",
+  rosegold_gradient:  "#C48888",
+  wood_gradient:      "#8B5E3C",
+  copper_gradient:    "#7A4010",
+  forest_gradient:    "#1E5C2A",
+  jade_gradient:      "#1A6B3A",
+  ocean_gradient:     "#0A5C8C",
+  midnight_gradient:  "#1A3A6B",
+  amethyst_gradient:  "#6B3A9C",
+  ruby_gradient:      "#8B1010",
+  coral_gradient:     "#CC4030",
 };
 
 // Build a real canvas linear gradient for PNG export (top→bottom over text box height)
 const GRADIENT_STOPS = {
-  gold_gradient:     ["#F5D478", "#C8922A", "#F5E6A3", "#A67620"],
-  silver_gradient:   ["#FFFFFF", "#888888", "#F0F0F0", "#585858"],
-  bronze_gradient:   ["#FFD07A", "#7A3E0E", "#D4904A", "#4A2006"],
-  rosegold_gradient: ["#FFD8C0", "#B06040", "#F0B898", "#803828"],
+  gold_gradient:      ["#F5D478", "#C8922A", "#F5E6A3", "#A67620"],
+  silver_gradient:    ["#FFFFFF", "#888888", "#F0F0F0", "#585858"],
+  bronze_gradient:    ["#FFD07A", "#7A3E0E", "#D4904A", "#4A2006"],
+  rosegold_gradient:  ["#FFD8C0", "#B06040", "#F0B898", "#803828"],
+  wood_gradient:      ["#D4A96A", "#8B5E3C", "#E8C896", "#5C3A1E"],
+  copper_gradient:    ["#E8A055", "#7A4010", "#F5C880", "#4A2008"],
+  forest_gradient:    ["#7EC858", "#1E5C2A", "#B8E890", "#0A3D18"],
+  jade_gradient:      ["#90D0A0", "#1A6B3A", "#C0E8C8", "#0D4A22"],
+  ocean_gradient:     ["#7EC8E3", "#0A5C8C", "#C5E8F5", "#043E5C"],
+  midnight_gradient:  ["#A0C4E8", "#1A3A6B", "#D8E8F8", "#0A1E4A"],
+  amethyst_gradient:  ["#C89FE3", "#6B3A9C", "#E8D5F8", "#4A1E78"],
+  ruby_gradient:      ["#F5A0A0", "#8B1010", "#F8D0D0", "#5A0808"],
+  coral_gradient:     ["#FF9B7A", "#CC4030", "#FFCBA8", "#8B2018"],
 };
-function buildCanvasGradient(ctx, colorVal, bx, by, bh) {
+function buildCanvasGradient(ctx, colorVal, bx, by, bh, bw = 0, item = null) {
+  if (colorVal === "custom_gradient" && item) {
+    const angle = item.customGradientAngle ?? 180;
+    const c1 = item.customGradientStart ?? "#FF8C00";
+    const c2 = item.customGradientEnd ?? "#FFD700";
+    const rad = (angle * Math.PI) / 180;
+    const dx = Math.sin(rad), dy = -Math.cos(rad);
+    const cx = bx + bw / 2, cy = by + bh / 2;
+    const halfLen = Math.sqrt((bw / 2) ** 2 + (bh / 2) ** 2) || bh / 2;
+    const grad = ctx.createLinearGradient(
+      cx - dx * halfLen, cy - dy * halfLen,
+      cx + dx * halfLen, cy + dy * halfLen,
+    );
+    grad.addColorStop(0, c1);
+    grad.addColorStop(1, c2);
+    return grad;
+  }
   const stops = GRADIENT_STOPS[colorVal];
   if (!stops) return colorVal; // solid color or custom hex
   const grad = ctx.createLinearGradient(bx, by, bx, by + bh);
@@ -185,6 +219,18 @@ const BOX_STYLE_PRESETS = {
     paddingX: 26,
     paddingY: 16,
   },
+  cloud_fade: {
+    label: "☁ Cloud / Mist",
+    fillColor: "#FFFFFF",
+    fillOpacity: 0.85,
+    borderColor: "#FFFFFF",
+    borderOpacity: 0,
+    borderWidth: 0,
+    radius: 60,
+    paddingX: 36,
+    paddingY: 20,
+    fadeEdges: true,
+  },
 };
 
 const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
@@ -205,6 +251,44 @@ const hexToRgba = (hex, alpha) => {
   return `rgba(${red}, ${green}, ${blue}, ${alpha})`;
 };
 
+// Only the bevel/emboss portion of the shadow — used on the solid-color backing layer.
+const computeBevelShadow = (item, s = 1) => {
+  if (!item.bevel) return "none";
+  const parts = [];
+  const depth = (item.bevelDepth ?? 4) * s;
+  const hi    = item.bevelHighlight ?? "#FFFFFF";
+  const sh    = item.bevelShadow    ?? "#000000";
+  const steps = Math.max(2, Math.round(depth));
+  parts.push(`${-Math.round(s)}px ${-Math.round(s)}px ${Math.round(s * 1.5)}px ${hexToRgba(hi, 0.4)}`);
+  for (let i = 1; i <= steps; i++) {
+    const alpha  = 0.1 + (i / steps) * 0.45;
+    const offset = Math.round((i / steps) * depth);
+    parts.push(`${offset}px ${offset}px 0px ${hexToRgba(sh, alpha)}`);
+  }
+  parts.push(`${Math.round(depth + s * 1.5)}px ${Math.round(depth + s * 2)}px ${Math.round(depth * 0.8 + s * 2)}px rgba(0,0,0,0.52)`);
+  return parts.join(", ");
+};
+
+// Glow + drop shadow only — applied on the main (gradient) text layer.
+const computeNonBevelShadow = (item, s = 1) => {
+  const parts = [];
+  if (item.glow) {
+    const gc = hexToRgba(item.glowColor ?? "#FFD700", item.glowOpacity ?? 0.85);
+    const gb = (item.glowBlur ?? 20) * s;
+    parts.push(`0px 0px ${gb * 1.6}px ${gc}`);
+    parts.push(`0px 0px ${gb * 0.7}px ${gc}`);
+    parts.push(`0px 0px ${gb * 0.25}px ${gc}`);
+  }
+  if (item.shadow) {
+    parts.push(
+      `${(item.shadowOffsetX ?? 2) * s}px ${(item.shadowOffsetY ?? 4) * s}px ` +
+      `${(item.shadowBlur ?? 8) * s}px ` +
+      `${hexToRgba(item.shadowColor ?? "#000000", item.shadowOpacity ?? 0.5)}`
+    );
+  }
+  return parts.length > 0 ? parts.join(", ") : "none";
+};
+
 const getPresetConfig = (presetKey) => BOX_STYLE_PRESETS[presetKey] ?? BOX_STYLE_PRESETS.rounded_translucent;
 
 const defaultTextItem = (pageWidth, pageHeight) => {
@@ -219,13 +303,13 @@ const defaultTextItem = (pageWidth, pageHeight) => {
     content: "Little {name} and the",
     x,
     y,
-    font: "'Lora', serif",
-    size: 42,
-    color: "gold_gradient",
-    customColor: "#FFD700",
+    font: "'Gambetta', serif",
+    size: 90,
+    color: "#FFFFFF",
+    customColor: "#FFFFFF",
     bold: true,
-    italic: true,
-    textAlign: "center",
+    italic: false,
+    textAlign: "left",
     shadow: true,
     shadowColor: "#000000",
     shadowOpacity: 0.52,
@@ -245,19 +329,47 @@ const defaultTextItem = (pageWidth, pageHeight) => {
     boxBorderColor: preset.borderColor,
     boxBorderOpacity: preset.borderOpacity,
     boxBorderWidth: preset.borderWidth,
-    boxRadius: preset.radius,
-    boxPaddingX: preset.paddingX,
-    boxPaddingY: preset.paddingY,
+    boxRadius:    preset.radius,
+    boxPaddingX:  preset.paddingX,
+    boxPaddingY:  preset.paddingY,
+    boxFadeEdges: preset.fadeEdges ?? false,
     textureImage: null,
+    customGradientStart: "#FF8C00",
+    customGradientEnd: "#FFD700",
+    customGradientAngle: 180,
+    stroke: false,
+    strokeWidth: 4,
+    strokeColor: "#000000",
+    strokeOpacity: 1,
+    bevel: false,
+    bevelDepth: 4,
+    bevelHighlight: "#FFFFFF",
+    bevelShadow: "#000000",
+    bevelTexture: null,
+    glow: false,
+    glowColor: "#FFD700",
+    glowBlur: 20,
+    glowOpacity: 0.85,
+    textTransform: "none",
+    underline: false,
   };
 };
 
 // Gradient CSS strings, shared between preview and canvas export
 const TEXT_GRADIENTS = {
-  gold_gradient:     "linear-gradient(180deg, #F5D478 0%, #C8922A 28%, #F5E6A3 52%, #A67620 100%)",
-  silver_gradient:   "linear-gradient(180deg, #FFFFFF 0%, #888888 28%, #F0F0F0 52%, #585858 100%)",
-  bronze_gradient:   "linear-gradient(180deg, #FFD07A 0%, #7A3E0E 28%, #D4904A 52%, #4A2006 100%)",
-  rosegold_gradient: "linear-gradient(180deg, #FFD8C0 0%, #B06040 28%, #F0B898 52%, #803828 100%)",
+  gold_gradient:      "linear-gradient(180deg, #F5D478 0%, #C8922A 28%, #F5E6A3 52%, #A67620 100%)",
+  silver_gradient:    "linear-gradient(180deg, #FFFFFF 0%, #888888 28%, #F0F0F0 52%, #585858 100%)",
+  bronze_gradient:    "linear-gradient(180deg, #FFD07A 0%, #7A3E0E 28%, #D4904A 52%, #4A2006 100%)",
+  rosegold_gradient:  "linear-gradient(180deg, #FFD8C0 0%, #B06040 28%, #F0B898 52%, #803828 100%)",
+  wood_gradient:      "linear-gradient(180deg, #D4A96A 0%, #8B5E3C 28%, #E8C896 52%, #5C3A1E 100%)",
+  copper_gradient:    "linear-gradient(180deg, #E8A055 0%, #7A4010 28%, #F5C880 52%, #4A2008 100%)",
+  forest_gradient:    "linear-gradient(180deg, #7EC858 0%, #1E5C2A 28%, #B8E890 52%, #0A3D18 100%)",
+  jade_gradient:      "linear-gradient(180deg, #90D0A0 0%, #1A6B3A 28%, #C0E8C8 52%, #0D4A22 100%)",
+  ocean_gradient:     "linear-gradient(180deg, #7EC8E3 0%, #0A5C8C 28%, #C5E8F5 52%, #043E5C 100%)",
+  midnight_gradient:  "linear-gradient(180deg, #A0C4E8 0%, #1A3A6B 28%, #D8E8F8 52%, #0A1E4A 100%)",
+  amethyst_gradient:  "linear-gradient(180deg, #C89FE3 0%, #6B3A9C 28%, #E8D5F8 52%, #4A1E78 100%)",
+  ruby_gradient:      "linear-gradient(180deg, #F5A0A0 0%, #8B1010 28%, #F8D0D0 52%, #5A0808 100%)",
+  coral_gradient:     "linear-gradient(180deg, #FF9B7A 0%, #CC4030 28%, #FFCBA8 52%, #8B2018 100%)",
 };
 
 // Every branch sets the SAME 8 longhand properties — never use the 'background' shorthand
@@ -273,10 +385,16 @@ const _COLOR_BASE = {
   backgroundClip:       "border-box",
 };
 
+// Padding added to every background-clip:text branch so script-font glyphs that
+// overhang the typographic box (e.g. Satisfy "L" tail) are not clipped.
+// Inline padding does not affect text layout/wrapping.
+const _CLIP_TEXT_PADDING = { padding: "0.12em 0.25em", margin: "0 -0.25em" };
+
 const getTextColorStyle = (item) => {
   if (item.textureImage) {
     return {
       ..._COLOR_BASE,
+      ..._CLIP_TEXT_PADDING,
       color:                "transparent",
       WebkitTextFillColor:  "transparent",
       backgroundImage:      `url(${item.textureImage})`,
@@ -288,14 +406,30 @@ const getTextColorStyle = (item) => {
     };
   }
 
+  if (item.color === "custom_gradient") {
+    const angle = item.customGradientAngle ?? 180;
+    const c1 = item.customGradientStart ?? "#FF8C00";
+    const c2 = item.customGradientEnd ?? "#FFD700";
+    return {
+      ..._COLOR_BASE,
+      ..._CLIP_TEXT_PADDING,
+      color:                "transparent",
+      WebkitTextFillColor:  "transparent",
+      backgroundImage:      `linear-gradient(${angle}deg, ${c1}, ${c2})`,
+      WebkitBackgroundClip: "text",
+      backgroundClip:       "text",
+    };
+  }
+
   const colorVal = item.color === "custom" ? item.customColor : item.color;
 
   if (TEXT_GRADIENTS[colorVal]) {
     return {
       ..._COLOR_BASE,
+      ..._CLIP_TEXT_PADDING,
       color:                "transparent",
       WebkitTextFillColor:  "transparent",
-      backgroundImage:      TEXT_GRADIENTS[colorVal],   // gradient via backgroundImage, NOT background shorthand
+      backgroundImage:      TEXT_GRADIENTS[colorVal],
       WebkitBackgroundClip: "text",
       backgroundClip:       "text",
     };
@@ -319,14 +453,17 @@ const getRenderedTextStyle = (item) => {
     lineHeight: item.lineHeight,
     textAlign: item.textAlign ?? "left",
     opacity: item.opacity,
-    textShadow: item.shadow
-      ? `${item.shadowOffsetX}px ${item.shadowOffsetY}px ${item.shadowBlur}px ${hexToRgba(item.shadowColor, item.shadowOpacity ?? 0.5)}`
-      : "none",
     whiteSpace: "pre-wrap",
     wordBreak: "break-word",
     overflowWrap: "anywhere",
     width: "100%",
     height: "100%",
+    WebkitTextStroke: item.stroke
+      ? `${item.strokeWidth ?? 4}px ${hexToRgba(item.strokeColor ?? "#000000", item.strokeOpacity ?? 1)}`
+      : "0px transparent",
+    paintOrder: "stroke fill",
+    textTransform: item.textTransform ?? "none",
+    textDecoration: item.underline ? "underline" : "none",
     // Color/gradient/texture applied separately on the inner <span> so that
     // background-clip: text clips to the actual text characters, not the full box height.
   };
@@ -391,13 +528,14 @@ function NumericField({
 // Custom font selector that renders each option in its own typeface.
 // Native <select> <option> elements CANNOT render custom fonts (OS limitation).
 const FONT_GROUPS = [
-  { key: "title",   label: "★ 大标题专用 / Title Display" },
-  { key: "fantasy", label: "✦ Fantasy / Storybook (奇幻故事)" },
-  { key: "cute",    label: "✦ Cute / Children's Book (可爱儿童)" },
-  { key: "script",  label: "✦ Calligraphy / Script (书法手写)" },
-  { key: "display", label: "✦ Bold Display / Impact (强势标题)" },
-  { key: "body",    label: "— Body / Subtitle (正文内文)" },
-  { key: "sans",    label: "— Sans-serif (无衬线)" },
+  { key: "serif",   label: "📖 Classic Serif (故事书衬线)" },
+  { key: "modern",  label: "🎨 Modern Design (设计感)" },
+  { key: "elegant", label: "✨ Elegant Display (典雅大标题)" },
+  { key: "title",   label: "🎪 Bold Title (冲击标题字)" },
+  { key: "space",   label: "🚀 Space & Tech (太空科技)" },
+  { key: "cute",    label: "🧒 Cute & Rounded (圆润可爱)" },
+  { key: "display", label: "🔤 Unique & Artistic (特效艺术字)" },
+  { key: "script",  label: "✍️  Script & Calligraphy (书法手写)" },
 ];
 
 function FontPicker({ value, onChange }) {
@@ -417,16 +555,20 @@ function FontPicker({ value, onChange }) {
     return () => document.removeEventListener("mousedown", handler);
   }, [open]);
 
-  // When picker opens: load all fonts, then scroll to current selection
+  // Pre-load all fonts once on mount so they're ready before first open
+  useEffect(() => {
+    const names = FONT_OPTIONS.map((f) => f.value.split(",")[0].trim().replace(/'/g, ""));
+    Promise.allSettled(names.map((n) => document.fonts.load(`400 20px "${n}"`)))
+      .then(() => forceUpdate((v) => v + 1));
+  }, []);
+
+  // When picker opens: ensure fonts loaded, then scroll to current selection
   useEffect(() => {
     if (!open) return;
-    const names = FONT_OPTIONS
-      .filter((f) => f.group !== "sans")
-      .map((f) => f.value.split(",")[0].trim().replace(/'/g, ""));
+    const names = FONT_OPTIONS.map((f) => f.value.split(",")[0].trim().replace(/'/g, ""));
     Promise.allSettled(names.map((n) => document.fonts.load(`400 20px "${n}"`))).then(() => {
       forceUpdate((v) => v + 1);
     });
-    // Scroll the active item into view after dropdown renders
     requestAnimationFrame(() => {
       activeRef.current?.scrollIntoView({ block: "center", behavior: "instant" });
     });
@@ -451,7 +593,7 @@ function FontPicker({ value, onChange }) {
           gap: 8,
         }}
       >
-        <span style={{ fontFamily: value, fontSize: 20, lineHeight: 1, flex: 1, textAlign: "left", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        <span style={{ fontFamily: value, fontSize: 20, lineHeight: 1.4, flex: 1, textAlign: "left", overflow: "hidden", whiteSpace: "nowrap" }}>
           {current?.label ?? "Select font"}
         </span>
         <span style={{ color: "#555", fontSize: 9, flexShrink: 0 }}>{open ? "▴" : "▾"}</span>
@@ -498,12 +640,12 @@ function FontPicker({ value, onChange }) {
                       ref={isActive ? activeRef : null}
                       onMouseDown={() => { onChange(f.value); setOpen(false); }}
                       style={{
-                        padding: "7px 16px",
+                        padding: "10px 16px",
                         cursor: "pointer",
                         background: isActive ? "#252010" : "transparent",
                         fontFamily: f.value,
                         fontSize: 18,
-                        lineHeight: 1.3,
+                        lineHeight: 1.6,
                         color: isActive ? "#F5D478" : "#D0D0D0",
                         borderLeft: isActive ? "2px solid #F5D478" : "2px solid transparent",
                         transition: "background 0.1s",
@@ -524,16 +666,6 @@ function FontPicker({ value, onChange }) {
   );
 }
 
-// Helper: convert File/Blob URL to base64 data URL
-const blobUrlToDataUrl = (blobUrl) =>
-  fetch(blobUrl).then((r) => r.blob()).then(
-    (blob) => new Promise((res, rej) => {
-      const reader = new FileReader();
-      reader.onload = () => res(reader.result);
-      reader.onerror = rej;
-      reader.readAsDataURL(blob);
-    })
-  );
 
 export default function TemplateEditor() {
   const [storyId, setStoryId] = useState("story_01");
@@ -546,18 +678,16 @@ export default function TemplateEditor() {
   const canvasRef = useRef(null);
   const [showExport, setShowExport] = useState(false);
   const [exportJSON, setExportJSON] = useState("");
+  const [exportMode, setExportMode] = useState("all");
+  const [batchExporting, setBatchExporting] = useState(false);
+  const [batchProgress, setBatchProgress] = useState({ done: 0, total: 0 });
+  const [imageLoadProgress, setImageLoadProgress] = useState({ active: false, done: 0, total: 0 });
   const [snapGuides, setSnapGuides] = useState([]);
   const [recentColors, setRecentColors] = useState([]);
   const [hoveredPage, setHoveredPage] = useState(null);
   const [sessionLoaded, setSessionLoaded] = useState(false);
-
-  // ── Force-preload all custom fonts so previews render correctly ──────────────
-  useEffect(() => {
-    const names = FONT_OPTIONS
-      .filter((f) => f.group !== "sans")
-      .map((f) => f.value.split(",")[0].trim().replace(/'/g, ""));
-    Promise.allSettled(names.map((n) => document.fonts.load(`400 24px "${n}"`)));
-  }, []);
+  // Local textarea state — avoids setPages on every keystroke (committed on blur / 200ms debounce)
+  const [localContent, setLocalContent] = useState("");
 
   // ── Session persistence ───────────────────────────────────────────────────────
   // Load saved session on first mount
@@ -597,16 +727,44 @@ export default function TemplateEditor() {
     load();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Auto-save session whenever pages or storyId change (debounced 2s)
+  // ── Drag/resize performance refs ──────────────────────────────────────────
+  // textBoxRefs: id → outer div DOM element (for direct style manipulation)
+  const textBoxRefs = useRef(new Map());
+  // dragLivePos: stores the final snapped position during drag (no re-render)
+  const dragLivePos = useRef({ x: 0, y: 0 });
+  // RAF handles for throttling snap guide updates and resize state updates
+  const snapRAFRef = useRef(null);
+  const resizeRAFRef = useRef(null);
+  // Debounce ref for content textarea (prevents setPages on every keystroke)
+  const contentDebounceRef = useRef(null);
+  // RAF ref for throttling slider onChange to 60fps
+  const sliderRAFRef = useRef(null);
+  // Tracks whether the current resize interaction actually moved (guards history save)
+  const resizeMovedRef = useRef(false);
+
+  // Auto-save session whenever pages or storyId change (debounced 2s).
+  // ⚠️ Images (base64) are intentionally EXCLUDED — they are 1-5MB each.
+  // Saving 8 pages × ~2MB = 16MB of JSON to disk every 2s causes main-thread jank.
+  // Images must be re-loaded after restart; all text configs (positions, styles, content) persist.
   const saveTimerRef = useRef(null);
   useEffect(() => {
-    if (!sessionLoaded) return; // don't save until initial load completes
+    if (!sessionLoaded) return;
     clearTimeout(saveTimerRef.current);
     saveTimerRef.current = setTimeout(() => {
       const api = window.templateEditorDesktop;
-      const payload = JSON.stringify({ storyId, pages });
+      // Strip base64 image data before serialising — keep only text configs
+      const saveable = {
+        storyId,
+        pages: pages.map((p) => ({
+          fileName: p.fileName,
+          width:    p.width,
+          height:   p.height,
+          texts:    p.texts,
+          // image intentionally omitted
+        })),
+      };
+      const payload = JSON.stringify(saveable);
       if (!api?.saveSession) {
-        // Web fallback: localStorage
         try { localStorage.setItem('ymi-session', payload); } catch {}
         return;
       }
@@ -616,6 +774,9 @@ export default function TemplateEditor() {
   }, [pages, storyId, sessionLoaded]);
 
   // ── History ────────────────────────────────────────────────────────────────
+  // Only snapshot texts[] per page — never the base64 image data.
+  // Images can't be undone and each one is 500KB–1MB; storing them in 40
+  // history entries with 8 pages would consume hundreds of MB and crash Electron.
   const MAX_HISTORY = 40;
   const historyRef = useRef([]);
   const historyIdxRef = useRef(-1);
@@ -623,9 +784,12 @@ export default function TemplateEditor() {
   useEffect(() => { pagesRef.current = pages; }, [pages]);
 
   const saveHistory = useCallback((label) => {
-    const snapshot = JSON.parse(JSON.stringify(pagesRef.current));
+    // Snapshot only texts arrays indexed by page position
+    const textsSnapshot = pagesRef.current.map((p) =>
+      JSON.parse(JSON.stringify(p.texts))
+    );
     const base = historyRef.current.slice(0, historyIdxRef.current + 1);
-    const entry = { pages: snapshot, label, time: Date.now() };
+    const entry = { texts: textsSnapshot, label, time: Date.now() };
     const next = [...base, entry].slice(-MAX_HISTORY);
     historyRef.current = next;
     historyIdxRef.current = next.length - 1;
@@ -635,7 +799,13 @@ export default function TemplateEditor() {
     if (idx < 0 || idx >= historyRef.current.length) return;
     const entry = historyRef.current[idx];
     historyIdxRef.current = idx;
-    setPages(JSON.parse(JSON.stringify(entry.pages)));
+    // Restore only texts; keep each page's image, fileName, width, height intact
+    setPages((prev) =>
+      prev.map((p, i) => ({
+        ...p,
+        texts: entry.texts[i] ? JSON.parse(JSON.stringify(entry.texts[i])) : p.texts,
+      }))
+    );
   }, []);
 
   const undo = useCallback(() => {
@@ -648,6 +818,7 @@ export default function TemplateEditor() {
     jumpToHistory(historyIdxRef.current + 1);
   }, [jumpToHistory]);
 
+  // Style preset keys that are safe to copy (exclude layout/position/content)
   const handleImageUpload = (e) => {
     const files = Array.from(e.target.files || []);
     files.forEach((file) => {
@@ -693,26 +864,24 @@ export default function TemplateEditor() {
   const applyBoxPreset = useCallback((id, presetKey) => {
     const preset = getPresetConfig(presetKey);
     updateText(id, {
-      boxStyle: presetKey,
-      boxFillColor: preset.fillColor,
+      boxStyle:       presetKey,
+      boxFillColor:   preset.fillColor,
       boxFillOpacity: preset.fillOpacity,
       boxBorderColor: preset.borderColor,
       boxBorderOpacity: preset.borderOpacity,
       boxBorderWidth: preset.borderWidth,
-      boxRadius: preset.radius,
-      boxPaddingX: preset.paddingX,
-      boxPaddingY: preset.paddingY,
+      boxRadius:      preset.radius,
+      boxPaddingX:    preset.paddingX,
+      boxPaddingY:    preset.paddingY,
+      boxFadeEdges: preset.fadeEdges ?? false,
     });
   }, [updateText]);
 
-  const handleTextureUpload = (e) => {
+  const handleTextureUpload = (prop, label) => (e) => {
     const file = e.target.files?.[0];
     if (!file || !sel) return;
     const reader = new FileReader();
-    reader.onload = (ev) => {
-      saveHistory("Add texture");
-      updateText(sel.id, { textureImage: ev.target.result });
-    };
+    reader.onload = (ev) => { saveHistory(label); updateText(sel.id, { [prop]: ev.target.result }); };
     reader.readAsDataURL(file);
     e.target.value = "";
   };
@@ -779,7 +948,7 @@ export default function TemplateEditor() {
     setSelectedText(id);
     const item = page.texts.find((t) => t.id === id);
     if (!item) return;
-    saveHistory("Move text");
+    dragLivePos.current = { x: item.x, y: item.y };
     setInteraction({
       type: "drag",
       id,
@@ -801,7 +970,7 @@ export default function TemplateEditor() {
     setSelectedText(id);
     const item = page.texts.find((t) => t.id === id);
     if (!item) return;
-    saveHistory("Resize text");
+    resizeMovedRef.current = false;
     setInteraction({
       type: "resize",
       handle,
@@ -844,7 +1013,6 @@ export default function TemplateEditor() {
       let snappedX = rawX;
       let snappedY = rawY;
 
-      // Dragged item's snap points: left / center / right
       const dragXPts = [rawX, Math.round(rawX + bw / 2), rawX + bw];
       for (let di = 0; di < dragXPts.length; di++) {
         for (const tx of snapX) {
@@ -857,7 +1025,6 @@ export default function TemplateEditor() {
         if (snappedX !== rawX) break;
       }
 
-      // Dragged item's snap points: top / center / bottom
       const dragYPts = [rawY, Math.round(rawY + bh / 2), rawY + bh];
       for (let di = 0; di < dragYPts.length; di++) {
         for (const ty of snapY) {
@@ -870,12 +1037,27 @@ export default function TemplateEditor() {
         if (snappedY !== rawY) break;
       }
 
-      setSnapGuides(guides);
-      updateText(interaction.id, { x: snappedX, y: snappedY });
+      // ── PERF: apply position via CSS transform directly on the DOM element ──
+      // This bypasses React's reconciler entirely — zero re-renders during drag.
+      // React still owns left/top (at origX/origY); transform handles the delta.
+      dragLivePos.current = { x: snappedX, y: snappedY };
+      const el = textBoxRefs.current.get(interaction.id);
+      if (el) {
+        const tdx = (snappedX - interaction.origX) * interaction.scale;
+        const tdy = (snappedY - interaction.origY) * interaction.scale;
+        el.style.transform = `translate(${tdx}px, ${tdy}px)`;
+      }
+
+      // Snap guides: RAF-throttled so they don't force a React render every pixel
+      if (snapRAFRef.current) cancelAnimationFrame(snapRAFRef.current);
+      snapRAFRef.current = requestAnimationFrame(() => setSnapGuides(guides));
       return;
     }
 
-    {
+    // ── Resize: RAF-throttled (caps React updates at 60fps) ──────────────────
+    if (resizeRAFRef.current) cancelAnimationFrame(resizeRAFRef.current);
+    resizeRAFRef.current = requestAnimationFrame(() => {
+      if (!interaction || interaction.type !== "resize") return;
       const dx = (e.clientX - interaction.startX) / interaction.scale;
       const dy = (e.clientY - interaction.startY) / interaction.scale;
       const h = interaction.handle ?? "se";
@@ -885,32 +1067,43 @@ export default function TemplateEditor() {
       let newW = interaction.origWidth;
       let newH = interaction.origHeight;
 
-      // East / West (width)
-      if (h.includes("e")) {
-        newW = clamp(Math.round(interaction.origWidth + dx), MIN_BOX_WIDTH, page.width - interaction.origX);
-      }
+      if (h.includes("e")) newW = clamp(Math.round(interaction.origWidth + dx), MIN_BOX_WIDTH, page.width - interaction.origX);
       if (h.includes("w")) {
-        // dragging left = origX decreases, width increases
         const rawX = Math.max(0, interaction.origX + Math.round(dx));
         newX = rawX;
         newW = Math.max(MIN_BOX_WIDTH, interaction.origX + interaction.origWidth - rawX);
       }
-
-      // South / North (height)
-      if (h.includes("s")) {
-        newH = clamp(Math.round(interaction.origHeight + dy), MIN_BOX_HEIGHT, page.height - interaction.origY);
-      }
+      if (h.includes("s")) newH = clamp(Math.round(interaction.origHeight + dy), MIN_BOX_HEIGHT, page.height - interaction.origY);
       if (h.includes("n")) {
         const rawY = Math.max(0, interaction.origY + Math.round(dy));
         newY = rawY;
         newH = Math.max(MIN_BOX_HEIGHT, interaction.origY + interaction.origHeight - rawY);
       }
 
+      resizeMovedRef.current = true;
       updateText(interaction.id, { x: newX, y: newY, boxWidth: newW, maxWidth: newW, boxHeight: newH });
-    }
+    });
   }, [interaction, page, updateText]);
 
-  const handleMouseUp = useCallback(() => { setInteraction(null); setSnapGuides([]); }, []);
+  const handleMouseUp = useCallback(() => {
+    if (interaction?.type === "drag") {
+      const el = textBoxRefs.current.get(interaction.id);
+      if (el) el.style.transform = "";
+      const { x: lx, y: ly } = dragLivePos.current;
+      // Only commit if the item actually moved (guards against pure-click position reset)
+      if (lx !== interaction.origX || ly !== interaction.origY) {
+        saveHistory("Move text");
+        updateText(interaction.id, { x: lx, y: ly });
+      }
+    }
+    if (interaction?.type === "resize" && resizeMovedRef.current) {
+      saveHistory("Resize text");
+    }
+    if (snapRAFRef.current) cancelAnimationFrame(snapRAFRef.current);
+    if (resizeRAFRef.current) cancelAnimationFrame(resizeRAFRef.current);
+    setInteraction(null);
+    setSnapGuides([]);
+  }, [interaction, updateText, saveHistory]);
 
   useEffect(() => {
     if (!interaction) return;
@@ -941,24 +1134,25 @@ export default function TemplateEditor() {
     return lines;
   };
 
-  const exportPNG = async () => {
-    if (!page || !page.image) { alert("Please upload an image for this page first."); return; }
+  // ── Shared canvas renderer ──────────────────────────────────────────────────
+  // Renders one page (image + texts) into a PNG Blob. Pure function — no state.
+  const renderPageToPngBlob = async (pageData, resolvedName) => {
     const canvas = document.createElement("canvas");
-    canvas.width = page.width;
-    canvas.height = page.height;
+    canvas.width = pageData.width;
+    canvas.height = pageData.height;
     const ctx = canvas.getContext("2d");
 
-    // Draw background image
+    // Background image
     const img = new Image();
-    await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = page.image; });
-    ctx.drawImage(img, 0, 0, page.width, page.height);
+    await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = pageData.image; });
+    ctx.drawImage(img, 0, 0, pageData.width, pageData.height);
 
-    for (const item of page.texts) {
+    for (const item of pageData.texts) {
       const bx = item.x;
       const by = item.y;
       const bw = item.boxWidth ?? item.maxWidth ?? MIN_BOX_WIDTH;
       const bh = item.boxHeight ?? MIN_BOX_HEIGHT;
-      const r = item.boxRadius ?? 0;
+      const r  = item.boxRadius ?? 0;
 
       ctx.save();
       ctx.globalAlpha = item.opacity ?? 1;
@@ -966,11 +1160,38 @@ export default function TemplateEditor() {
       // Box fill
       if ((item.boxFillOpacity ?? 0) > 0) {
         ctx.save();
-        ctx.globalAlpha = (item.opacity ?? 1) * (item.boxFillOpacity ?? 0);
-        ctx.fillStyle = item.boxFillColor ?? "#0F172A";
-        ctx.beginPath();
-        ctx.roundRect(bx, by, bw, bh, r);
-        ctx.fill();
+        ctx.globalAlpha = item.opacity ?? 1;
+
+        if (item.boxFadeEdges) {
+          // Cloud / Mist — single elliptical gradient matching the CSS radial-gradient(ellipse).
+          // We simulate an ellipse by scaling the coordinate system to a unit circle,
+          // drawing a circular gradient, then restoring — this gives a true ellipse.
+          const col = item.boxFillColor ?? "#FFFFFF";
+          const op  = item.boxFillOpacity ?? 0.85;
+
+          ctx.beginPath();
+          ctx.roundRect(bx, by, bw, bh, r);
+          ctx.clip();
+
+          // Scale CTM so (0,0)→(1,1) maps to the box bounds — gradient unit circle = ellipse
+          ctx.translate(bx + bw / 2, by + bh / 2);
+          ctx.scale(bw / 2, bh / 2);
+
+          const grad = ctx.createRadialGradient(0, 0, 0, 0, 0, 1);
+          grad.addColorStop(0,    hexToRgba(col, op * 0.72));
+          grad.addColorStop(0.38, hexToRgba(col, op * 0.48));
+          grad.addColorStop(0.68, hexToRgba(col, op * 0.18));
+          grad.addColorStop(1,    hexToRgba(col, 0));
+          ctx.fillStyle = grad;
+          ctx.fillRect(-1, -1, 2, 2); // fills the entire unit-circle space = box area
+        } else {
+          ctx.globalAlpha = (item.opacity ?? 1) * (item.boxFillOpacity ?? 0);
+          ctx.fillStyle = item.boxFillColor ?? "#0F172A";
+          ctx.beginPath();
+          ctx.roundRect(bx, by, bw, bh, r);
+          ctx.fill();
+        }
+
         ctx.restore();
       }
 
@@ -979,99 +1200,297 @@ export default function TemplateEditor() {
         ctx.save();
         ctx.globalAlpha = (item.opacity ?? 1) * (item.boxBorderOpacity ?? 0);
         ctx.strokeStyle = item.boxBorderColor ?? "#FFFFFF";
-        ctx.lineWidth = item.boxBorderWidth ?? 1;
+        ctx.lineWidth   = item.boxBorderWidth ?? 1;
         ctx.beginPath();
         ctx.roundRect(bx, by, bw, bh, r);
         ctx.stroke();
         ctx.restore();
       }
 
-      // Text
-      if (item.shadow) {
-        ctx.shadowColor = hexToRgba(item.shadowColor ?? "#000000", item.shadowOpacity ?? 0.5);
-        ctx.shadowBlur = item.shadowBlur ?? 8;
-        ctx.shadowOffsetX = item.shadowOffsetX ?? 2;
-        ctx.shadowOffsetY = item.shadowOffsetY ?? 4;
-      }
-
       const colorVal = item.color === "custom" ? (item.customColor ?? "#FFFFFF") : item.color;
-      ctx.fillStyle = buildCanvasGradient(ctx, colorVal, bx, by, bh);
+      ctx.fillStyle = buildCanvasGradient(ctx, colorVal, bx, by, bh, bw, item);
 
       const fontStr = `${item.italic ? "italic " : ""}${item.bold ? "bold " : ""}${item.size}px ${item.font}`;
       ctx.font = fontStr;
       ctx.letterSpacing = `${item.letterSpacing ?? 0}px`;
 
-      const px = item.boxPaddingX ?? 0;
-      const py = item.boxPaddingY ?? 0;
-      const textX = bx + px;
-      const availW = bw - px * 2;
-      const lineH = item.size * (item.lineHeight ?? 1.2);
-      const content = item.content.replace(/\{name\}/g, previewName);
-      const lines = wrapTextCanvas(ctx, content, availW);
-      const align = item.textAlign ?? "left";
+      const px_     = item.boxPaddingX ?? 0;
+      const py_     = item.boxPaddingY ?? 0;
+      const textX   = bx + px_;
+      const availW  = bw - px_ * 2;
+      const lineH   = item.size * (item.lineHeight ?? 1.2);
+      const rawContent = item.content.replace(/\{name\}/g, resolvedName);
+      const tt = item.textTransform ?? "none";
+      const content = tt === "uppercase" ? rawContent.toUpperCase()
+        : tt === "lowercase" ? rawContent.toLowerCase()
+        : tt === "capitalize" ? rawContent.replace(/\b\w/g, (c) => c.toUpperCase())
+        : rawContent;
+      const lines  = wrapTextCanvas(ctx, content, availW);
+      const align  = item.textAlign ?? "left";
       ctx.textAlign = align;
-      const alignX = align === "center" ? bx + bw / 2 : align === "right" ? bx + bw - px : textX;
+      const alignX = align === "center" ? bx + bw / 2 : align === "right" ? bx + bw - px_ : textX;
 
+      const drawLines = (cx, drawFn) =>
+        lines.forEach((line, li) => drawFn(line, cx, by + py_ + item.size + li * lineH));
+
+      // Glow
+      if (item.glow) {
+        ctx.save();
+        ctx.shadowColor   = hexToRgba(item.glowColor ?? "#FFD700", item.glowOpacity ?? 0.85);
+        ctx.shadowBlur    = item.glowBlur ?? 20;
+        ctx.shadowOffsetX = 0;
+        ctx.shadowOffsetY = 0;
+        ctx.fillStyle     = hexToRgba(item.glowColor ?? "#FFD700", 0.001);
+        for (let g = 0; g < 3; g++) drawLines(alignX, (ln, ax, ay) => ctx.fillText(ln, ax, ay));
+        ctx.restore();
+      }
+
+      // Bevel
+      if (item.bevel) {
+        ctx.save();
+        const depth = item.bevelDepth ?? 4;
+        const sh = item.bevelShadow    ?? "#000000";
+        const hi = item.bevelHighlight ?? "#FFFFFF";
+        const drawBevelSteps = (fillStyle) => {
+          for (let i = depth; i >= 1; i--) {
+            const alpha = 0.08 + ((depth - i + 1) / depth) * 0.42;
+            ctx.save();
+            ctx.globalAlpha = alpha;
+            ctx.fillStyle   = fillStyle;
+            drawLines(alignX + i, (ln, ax, ay) => ctx.fillText(ln, ax, ay + i));
+            ctx.restore();
+          }
+        };
+        if (item.bevelTexture) {
+          const texImg = await new Promise((res) => {
+            const ti = new Image(); ti.onload = () => res(ti); ti.onerror = () => res(null); ti.src = item.bevelTexture;
+          });
+          texImg ? drawBevelSteps(ctx.createPattern(texImg, "repeat")) : drawBevelSteps(hexToRgba(sh, 1));
+        } else {
+          for (let i = depth; i >= 1; i--) {
+            const alpha = 0.08 + ((depth - i + 1) / depth) * 0.42;
+            ctx.fillStyle = hexToRgba(sh, alpha);
+            drawLines(alignX + i, (ln, ax, ay) => ctx.fillText(ln, ax, ay + i));
+          }
+        }
+        ctx.fillStyle = hexToRgba(hi, 0.35);
+        drawLines(alignX - 1, (ln, ax, ay) => ctx.fillText(ln, ax, ay - 1));
+        ctx.restore();
+      }
+
+      // Drop shadow
+      if (item.shadow) {
+        ctx.save();
+        ctx.shadowColor   = hexToRgba(item.shadowColor ?? "#000000", item.shadowOpacity ?? 0.5);
+        ctx.shadowBlur    = item.shadowBlur ?? 8;
+        ctx.shadowOffsetX = item.shadowOffsetX ?? 2;
+        ctx.shadowOffsetY = item.shadowOffsetY ?? 4;
+        ctx.fillStyle     = hexToRgba("#000000", 0.001);
+        drawLines(alignX, (ln, ax, ay) => ctx.fillText(ln, ax, ay));
+        ctx.restore();
+      }
+
+      // Stroke
+      if (item.stroke) {
+        ctx.lineWidth   = item.strokeWidth ?? 4;
+        ctx.strokeStyle = hexToRgba(item.strokeColor ?? "#000000", item.strokeOpacity ?? 1);
+        ctx.lineJoin    = "round";
+        drawLines(alignX, (ln, ax, ay) => ctx.strokeText(ln, ax, ay));
+      }
+
+      // Clear shadow state
+      ctx.shadowColor = "transparent"; ctx.shadowBlur = 0; ctx.shadowOffsetX = 0; ctx.shadowOffsetY = 0;
+
+      // Fill / texture
       if (item.textureImage) {
-        // Render text texture via offscreen canvas + source-in composite
-        const off = document.createElement("canvas");
-        off.width = bw; off.height = bh;
+        const off    = document.createElement("canvas");
+        off.width    = bw; off.height = bh;
         const offCtx = off.getContext("2d");
-        offCtx.font = fontStr;
+        offCtx.font          = fontStr;
         offCtx.letterSpacing = `${item.letterSpacing ?? 0}px`;
-        offCtx.textAlign = align;
-        const offAlignX = align === "center" ? bw / 2 : align === "right" ? bw - px : px;
-        offCtx.fillStyle = "#fff";
-        lines.forEach((line, li) => {
-          offCtx.fillText(line, offAlignX, py + item.size + li * lineH);
-        });
+        offCtx.textAlign     = align;
+        const offAlignX      = align === "center" ? bw / 2 : align === "right" ? bw - px_ : px_;
+        offCtx.fillStyle     = "#fff";
+        lines.forEach((line, li) => offCtx.fillText(line, offAlignX, py_ + item.size + li * lineH));
         const texImg = new Image();
         await new Promise((res) => { texImg.onload = res; texImg.src = item.textureImage; });
         offCtx.globalCompositeOperation = "source-in";
         offCtx.drawImage(texImg, 0, 0, bw, bh);
-        ctx.shadowColor = "transparent";
         ctx.drawImage(off, bx, by);
       } else {
-        lines.forEach((line, li) => {
-          ctx.fillText(line, alignX, by + py + item.size + li * lineH);
-        });
+        lines.forEach((line, li) => ctx.fillText(line, alignX, by + py_ + item.size + li * lineH));
       }
 
       ctx.restore();
     }
 
-    canvas.toBlob((blob) => {
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `${storyId}_page${currentPage + 1}_preview.png`;
-      a.click();
-      URL.revokeObjectURL(url);
-    }, "image/png");
+    return new Promise((res, rej) => canvas.toBlob((b) => b ? res(b) : rej(new Error("toBlob failed")), "image/png"));
   };
 
-  const resolveExportColor = (color, customColor) => {
+  // ── Single-page PNG export (current page) ───────────────────────────────────
+  const exportPNG = async () => {
+    if (!page || !page.image) { alert("Please upload an image for this page first."); return; }
+    const blob = await renderPageToPngBlob(page, previewName);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${storyId}_page${currentPage + 1}_preview.png`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  // ── Batch PNG export → single ZIP download ─────────────────────────────────
+  const exportAllPNG = async () => {
+    const withImages = pages.map((p, i) => ({ p, i })).filter(({ p }) => p.image);
+    if (withImages.length === 0) { alert("No pages have images loaded. Upload images first."); return; }
+
+    setBatchExporting(true);
+    setBatchProgress({ done: 0, total: withImages.length });
+
+    const zip = new JSZip();
+
+    for (const { p, i } of withImages) {
+      try {
+        const blob = await renderPageToPngBlob(p, previewName);
+        const stem = p.fileName ? p.fileName.replace(/\.[^.]+$/, "") : `page_${String(i + 1).padStart(2, "0")}`;
+        // Zero-pad page number so files sort correctly in the folder
+        const filename = `${String(i + 1).padStart(2, "0")}_${stem}_subtitle.png`;
+        zip.file(filename, blob);
+      } catch (err) {
+        console.error(`Page ${i + 1} render failed:`, err);
+      }
+      setBatchProgress({ done: i + 1, total: withImages.length });
+    }
+
+    // Generate ZIP with compression
+    const zipBlob = await zip.generateAsync({
+      type: "blob",
+      compression: "DEFLATE",
+      compressionOptions: { level: 1 }, // level 1 = fastest; PNGs are already compressed
+    }, (meta) => {
+      // meta.percent fires during ZIP generation — reuse the progress bar
+      setBatchProgress((prev) => ({ ...prev, done: Math.round(prev.total * (1 - meta.percent / 100)) + Math.round(meta.percent / 100 * prev.total) }));
+    });
+
+    const url = URL.createObjectURL(zipBlob);
+    const a   = document.createElement("a");
+    a.href    = url;
+    a.download = `${storyId}_subtitles_${withImages.length}pages.zip`;
+    a.click();
+    URL.revokeObjectURL(url);
+
+    setBatchExporting(false);
+  };
+
+  // ── Batch image loader ─────────────────────────────────────────────────────
+  // Strategy: try exact fileName match first; remaining files fill pages in order.
+  // Works whether pages came from JSON import (image=null) or are already populated.
+  const batchLoadImages = (e) => {
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0) return;
+    e.target.value = "";
+
+    // Show progress immediately
+    setImageLoadProgress({ active: true, done: 0, total: files.length });
+
+    let doneCount = 0;
+    const readFile = (file) =>
+      new Promise((res) => {
+        const reader = new FileReader();
+        reader.onload = (ev) => {
+          const dataUrl = ev.target.result;
+          const img = new Image();
+          img.onload = () => {
+            doneCount++;
+            // Update progress counter as each file finishes decoding
+            setImageLoadProgress({ active: true, done: doneCount, total: files.length });
+            res({ dataUrl, width: img.naturalWidth, height: img.naturalHeight, name: file.name });
+          };
+          img.src = dataUrl;
+        };
+        reader.readAsDataURL(file);
+      });
+
+    Promise.all(files.map(readFile)).then((results) => {
+      setImageLoadProgress({ active: false, done: 0, total: 0 });
+      setPages((prev) => {
+        // ── Case A: no pages yet → create new pages for all files ────────────
+        if (prev.length === 0) {
+          return results.map((r) => ({
+            image: r.dataUrl, fileName: r.name,
+            width: r.width, height: r.height, texts: [],
+          }));
+        }
+
+        // ── Case B: pages exist ───────────────────────────────────────────────
+        // Rule: pages that ALREADY have an image are NEVER touched.
+        //       Empty pages (image=null) get filled first — by fileName then by order.
+        //       Files left over after all empty slots are filled → appended as new pages.
+
+        const byName = new Map(results.map((r) => [r.name.toLowerCase(), r]));
+        const usedFileNames = new Set();
+
+        // Pass 1 — fill empty pages by exact fileName match
+        const afterNameMatch = prev.map((p) => {
+          if (p.image) return p; // already has image, never touch
+          const key = (p.fileName ?? "").toLowerCase();
+          if (key && byName.has(key)) {
+            usedFileNames.add(key);
+            const r = byName.get(key);
+            return { ...p, image: r.dataUrl, width: r.width, height: r.height };
+          }
+          return p; // still empty, needs positional
+        });
+
+        // Pass 2 — fill remaining empty pages positionally (files not yet used)
+        const positionalQueue = results.filter((r) => !usedFileNames.has(r.name.toLowerCase()));
+        let posIdx = 0;
+        const afterPositional = afterNameMatch.map((p) => {
+          if (p.image) return p;
+          if (posIdx < positionalQueue.length) {
+            const r = positionalQueue[posIdx++];
+            return { ...p, image: r.dataUrl, width: r.width, height: r.height };
+          }
+          return p; // no file left for this page
+        });
+
+        // Pass 3 — any remaining files (more than empty slots) → new pages
+        const extraFiles = positionalQueue.slice(posIdx);
+        const newPages = extraFiles.map((r) => ({
+          image: r.dataUrl, fileName: r.name,
+          width: r.width, height: r.height, texts: [],
+        }));
+
+        return [...afterPositional, ...newPages];
+      });
+    });
+  };
+
+  const resolveExportColor = (color, customColor, gradientStart) => {
+    if (color === "custom_gradient") return gradientStart ?? "#FF8C00";
     if (color === "custom") return customColor ?? "#FFFFFF";
     return GRADIENT_COLOR_MAP[color] ?? color;
   };
 
-  const generateExport = () => {
+  const generateExport = (mode = "all") => {
+    const pagesToExport = mode === "current" ? [pages[currentPage]] : pages;
+    const pageOffset = mode === "current" ? currentPage : 0;
     const config = {
       story_id: storyId,
       generated_at: new Date().toISOString(),
-      pages: pages.map((p, i) => ({
-        page: i + 1,
-        image: p.fileName ?? `page_${i + 1}.png`,
+      pages: pagesToExport.map((p, i) => ({
+        page: pageOffset + i + 1,
+        image: p.fileName ?? `page_${pageOffset + i + 1}.png`,
         width: p.width ?? 0,
         height: p.height ?? 0,
-        texts: p.texts.map(({ id, customColor, color, ...t }) => ({
+        texts: p.texts.map(({ id, customColor, customGradientStart, color, ...t }) => ({
           ...t,
-          color: resolveExportColor(color, customColor),
+          color: resolveExportColor(color, customColor, customGradientStart),
         })),
       })),
     };
-    const json = JSON.stringify(config, null, 2);
-    setExportJSON(json);
+    setExportJSON(JSON.stringify(config, null, 2));
+    setExportMode(mode);
     setShowExport(true);
   };
 
@@ -1084,12 +1503,24 @@ export default function TemplateEditor() {
         const config = JSON.parse(ev.target.result);
         if (config.story_id) setStoryId(config.story_id);
         if (Array.isArray(config.pages)) {
-          setPages(config.pages.map((p) => ({
-            image: null,
-            fileName: p.image ?? "",
-            width: p.width ?? 2480,
-            height: p.height ?? 3508,
-            texts: (p.texts ?? []).map((t) => ({
+          // Use functional update so we can read the current pages state.
+          // This lets us PRESERVE existing images: if the user already uploaded
+          // images (as pages) and then imports a JSON, the images are kept.
+          // Matching priority: (1) fileName match, (2) same index.
+          setPages((prev) => config.pages.map((p, jsonIdx) => {
+            const wantedFileName = (p.image ?? "").toLowerCase();
+            // Try to find an existing page that already has an image for this slot
+            const byName  = wantedFileName ? prev.find(ep => ep.image && (ep.fileName ?? "").toLowerCase() === wantedFileName) : null;
+            const byIndex = prev[jsonIdx];
+            const existing = byName ?? byIndex ?? null;
+
+            return {
+              // Keep the existing image if we found one; otherwise null (needs batch assign later)
+              image:    existing?.image ?? null,
+              fileName: p.image ?? existing?.fileName ?? "",
+              width:    p.width  ?? existing?.width  ?? 2480,
+              height:   p.height ?? existing?.height ?? 3508,
+              texts: (p.texts ?? []).map((t) => ({
               id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
               role: t.role ?? "body",
               content: t.content ?? "",
@@ -1123,9 +1554,26 @@ export default function TemplateEditor() {
               boxBorderWidth: t.boxBorderWidth ?? 0,
               boxRadius: t.boxRadius ?? 0,
               boxPaddingX: t.boxPaddingX ?? 0,
-              boxPaddingY: t.boxPaddingY ?? 0,
+              boxPaddingY:  t.boxPaddingY ?? 0,
+              boxFadeEdges: t.boxFadeEdges ?? false,
+              stroke: t.stroke ?? false,
+              strokeWidth: t.strokeWidth ?? 4,
+              strokeColor: t.strokeColor ?? "#000000",
+              strokeOpacity: t.strokeOpacity ?? 1,
+              bevel: t.bevel ?? false,
+              bevelDepth: t.bevelDepth ?? 4,
+              bevelHighlight: t.bevelHighlight ?? "#FFFFFF",
+              bevelShadow: t.bevelShadow ?? "#000000",
+              bevelTexture: t.bevelTexture ?? null,
+              glow: t.glow ?? false,
+              glowColor: t.glowColor ?? "#FFD700",
+              glowBlur: t.glowBlur ?? 20,
+              glowOpacity: t.glowOpacity ?? 0.85,
+              textTransform: t.textTransform ?? "none",
+              underline: t.underline ?? false,
             })),
-          })));
+            };
+          }));
           setCurrentPage(0);
           setSelectedText(null);
         }
@@ -1142,12 +1590,25 @@ export default function TemplateEditor() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `${storyId}_template.json`;
+    a.download = exportMode === "current"
+      ? `${storyId}_page${currentPage + 1}_template.json`
+      : `${storyId}_template.json`;
     a.click();
     URL.revokeObjectURL(url);
   };
 
   const sel = page?.texts.find((t) => t.id === selectedText) ?? null;
+
+  // Sync local textarea content whenever selection changes to a different text box
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { setLocalContent(sel?.content ?? ""); }, [sel?.id]);
+
+  // RAF-throttled updateText for sliders — caps React renders at 60fps during scrub
+  const sliderUpdate = useCallback((id, updates) => {
+    if (sliderRAFRef.current) cancelAnimationFrame(sliderRAFRef.current);
+    sliderRAFRef.current = requestAnimationFrame(() => updateText(id, updates));
+  }, [updateText]);
+
   const pageHeight = page ? CANVAS_WIDTH * (page.height / page.width) : 0;
   const renderedCanvasWidth = page ? page.width * scale : CANVAS_WIDTH * viewportZoom;
   const renderedCanvasHeight = page ? page.height * scale : pageHeight * viewportZoom;
@@ -1199,17 +1660,34 @@ export default function TemplateEditor() {
       ...getRenderedTextStyle(item),
       fontSize: `${item.size * scale}px`,
       letterSpacing: `${item.letterSpacing * scale}px`,
-      textShadow: item.shadow
-        ? `${item.shadowOffsetX * scale}px ${item.shadowOffsetY * scale}px ${item.shadowBlur * scale}px ${hexToRgba(item.shadowColor, item.shadowOpacity ?? 0.5)}`
-        : "none",
+      // Bevel is rendered on a separate backing layer so it never bleeds through gradient text.
+      textShadow: computeNonBevelShadow(item, scale),
+      WebkitTextStroke: item.stroke
+        ? `${(item.strokeWidth ?? 4) * scale}px ${hexToRgba(item.strokeColor ?? "#000000", item.strokeOpacity ?? 1)}`
+        : "0px transparent",
+      paintOrder: "stroke fill",
+      position: "relative",
     };
     const boxPaddingX = (item.boxPaddingX ?? 0) * scale;
     const boxPaddingY = (item.boxPaddingY ?? 0) * scale;
     const borderWidth = (item.boxBorderWidth ?? 0) * scale;
 
+    // Cloud/mist: single smooth elliptical gradient — no flat zones, no stacking.
+    // opacity multiplier keeps the center visually soft even at high fillOpacity.
+    const cloudBg = (() => {
+      if (!item.boxFadeEdges || (item.boxFillOpacity ?? 0) === 0) return null;
+      const c  = item.boxFillColor ?? "#FFFFFF";
+      const op = item.boxFillOpacity ?? 0.85;
+      return `radial-gradient(ellipse at center, ${hexToRgba(c, op * 0.72)} 0%, ${hexToRgba(c, op * 0.48)} 38%, ${hexToRgba(c, op * 0.18)} 68%, transparent 100%)`;
+    })();
+
     return (
       <div
         key={item.id}
+        ref={(el) => {
+          if (el) textBoxRefs.current.set(item.id, el);
+          else textBoxRefs.current.delete(item.id);
+        }}
         onMouseDown={(e) => handleDragStart(e, item.id)}
         style={{
           position: "absolute",
@@ -1221,7 +1699,7 @@ export default function TemplateEditor() {
           outline: isSelected ? "2px solid rgba(56,189,248,0.9)" : "none",
           outlineOffset: "1px",
           borderRadius: (item.boxRadius ?? 0) * scale,
-          background: hexToRgba(item.boxFillColor ?? "#0F172A", item.boxFillOpacity ?? 0),
+          background: cloudBg ?? hexToRgba(item.boxFillColor ?? "#0F172A", item.boxFillOpacity ?? 0),
           boxSizing: "border-box",
           cursor: isDragging ? "grabbing" : "grab",
           userSelect: "none",
@@ -1238,7 +1716,22 @@ export default function TemplateEditor() {
           }}
         >
           <div style={displayStyle}>
-            <span style={getTextColorStyle(item)}>{displayContent}</span>
+            {item.bevel && (
+              <span style={{
+                position: "absolute",
+                inset: 0,
+                zIndex: 0,
+                color: item.bevelShadow ?? "#000000",
+                WebkitTextFillColor: item.bevelShadow ?? "#000000",
+                textShadow: computeBevelShadow(item, scale),
+                pointerEvents: "none",
+              }}>
+                {displayContent}
+              </span>
+            )}
+            <span style={{ ...getTextColorStyle(item), position: "relative", zIndex: 1 }}>
+              {displayContent}
+            </span>
           </div>
         </div>
 
@@ -1267,6 +1760,7 @@ export default function TemplateEditor() {
 
   return (
     <div style={{ fontFamily: "'Söhne', system-ui, sans-serif", minHeight: "100vh", background: "#0D0D0D", color: "#E0E0E0" }}>
+      <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
       <div style={{ padding: "16px 24px", borderBottom: "1px solid #222", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <div style={{ width: 32, height: 32, borderRadius: 8, background: "linear-gradient(135deg, #F5D478, #A67620)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, fontWeight: 700, color: "#111" }}>Y</div>
@@ -1289,10 +1783,50 @@ export default function TemplateEditor() {
 
       <div style={{ display: "flex", height: "calc(100vh - 65px)" }}>
         <div style={{ width: 180, borderRight: "1px solid #222", padding: 12, overflowY: "auto", flexShrink: 0 }}>
-          <label style={{ display: "block", padding: "12px 0", textAlign: "center", border: "2px dashed #333", borderRadius: 8, cursor: "pointer", fontSize: 12, color: "#888", marginBottom: 8 }}>
-            + Upload pages
+          <label style={{ display: "block", padding: "10px 0", textAlign: "center", border: "2px dashed #333", borderRadius: 8, cursor: "pointer", fontSize: 12, color: "#888", marginBottom: 6 }}>
+            + Upload pages (new)
             <input type="file" accept="image/*" multiple onChange={handleImageUpload} style={{ display: "none" }} />
           </label>
+          {/* ── Assign images button + live progress ── */}
+          {imageLoadProgress.active ? (
+            // Loading state: button replaced by animated progress indicator
+            <div style={{ marginBottom: 6, border: "1px solid #1d4ed8", borderRadius: 8, background: "#0d1833", overflow: "hidden" }}>
+              <div style={{ padding: "7px 8px 4px", display: "flex", alignItems: "center", gap: 6 }}>
+                {/* Spinner */}
+                <svg width="13" height="13" viewBox="0 0 13 13" style={{ flexShrink: 0, animation: "spin 0.8s linear infinite" }}>
+                  <circle cx="6.5" cy="6.5" r="5" fill="none" stroke="#3b82f6" strokeWidth="1.5" strokeDasharray="20 12" />
+                </svg>
+                <span style={{ fontSize: 11, color: "#93c5fd", fontWeight: 600, flex: 1 }}>
+                  Loading {imageLoadProgress.done} / {imageLoadProgress.total}
+                </span>
+                <span style={{ fontSize: 10, color: "#3b82f6" }}>
+                  {imageLoadProgress.total > 0 ? Math.round((imageLoadProgress.done / imageLoadProgress.total) * 100) : 0}%
+                </span>
+              </div>
+              {/* Progress bar */}
+              <div style={{ height: 3, background: "#1e3a5f" }}>
+                <div style={{
+                  height: "100%",
+                  background: "linear-gradient(90deg, #2563eb, #60a5fa)",
+                  width: `${imageLoadProgress.total > 0 ? (imageLoadProgress.done / imageLoadProgress.total) * 100 : 0}%`,
+                  transition: "width 0.15s ease",
+                }} />
+              </div>
+            </div>
+          ) : (
+            <label
+              title="Pick images and assign them to existing pages — matches by filename first, then fills remaining pages in order"
+              style={{ display: "block", padding: "8px 4px", textAlign: "center", border: `1px solid ${pages.some(p => !p.image) ? "#a16207" : "#2a4a2a"}`, borderRadius: 8, cursor: "pointer", fontSize: 11, color: pages.some(p => !p.image) ? "#fbbf24" : "#6a9a6a", background: pages.some(p => !p.image) ? "#1c1400" : "#0d1f0d", marginBottom: 4 }}
+            >
+              📥 Assign images to pages
+              <input type="file" accept="image/*" multiple onChange={batchLoadImages} style={{ display: "none" }} />
+            </label>
+          )}
+          {!imageLoadProgress.active && pages.length > 0 && pages.some(p => !p.image) && (
+            <div style={{ fontSize: 10, color: "#92400e", background: "#1c1400", borderRadius: 4, padding: "3px 6px", marginBottom: 6, textAlign: "center", border: "1px solid #78350f" }}>
+              ⚠ {pages.filter(p => !p.image).length}/{pages.length} pages need images
+            </div>
+          )}
           {pages.map((p, i) => (
             <div key={i}
               onMouseEnter={() => setHoveredPage(i)}
@@ -1302,9 +1836,14 @@ export default function TemplateEditor() {
               <div onClick={() => setCurrentPage(i)} style={{ cursor: "pointer" }}>
                 {p.image
                   ? <img src={p.image} alt={`Page ${i + 1}`} style={{ width: "100%", borderRadius: 4, display: "block" }} />
-                  : <div style={{ width: "100%", aspectRatio: "3/4", background: "#1a1a1a", borderRadius: 4, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18 }}>🖼️</div>
+                  : (
+                    <div style={{ width: "100%", aspectRatio: "3/4", background: "#1a1a1a", borderRadius: 4, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 4, padding: 4 }}>
+                      <span style={{ fontSize: 18 }}>🖼️</span>
+                      {p.fileName && <span style={{ fontSize: 8, color: "#555", textAlign: "center", wordBreak: "break-all", lineHeight: 1.2 }}>{p.fileName}</span>}
+                    </div>
+                  )
                 }
-                <div style={{ fontSize: 10, color: "#888", textAlign: "center", marginTop: 2 }}>Page {i + 1} · {p.texts.length} texts</div>
+                <div style={{ fontSize: 10, color: p.image ? "#888" : "#a16207", textAlign: "center", marginTop: 2 }}>Page {i + 1} · {p.texts.length} texts{!p.image ? " · no image" : ""}</div>
               </div>
               {hoveredPage === i && (
                 <button
@@ -1402,7 +1941,23 @@ export default function TemplateEditor() {
               </div>
 
               <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 4 }}>Content (use {`{name}`} for user's name)</label>
-              <textarea value={sel.content} onChange={(e) => updateText(sel.id, { content: e.target.value })} rows={4} style={{ width: "100%", background: "#1A1A1A", border: "1px solid #333", borderRadius: 6, padding: 8, color: "#E0E0E0", fontSize: 13, resize: "vertical", marginBottom: 12, fontFamily: "monospace" }} />
+              <textarea
+                value={localContent}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  setLocalContent(v);
+                  // Debounce: write to pages state 200ms after last keystroke
+                  if (contentDebounceRef.current) clearTimeout(contentDebounceRef.current);
+                  contentDebounceRef.current = setTimeout(() => updateText(sel.id, { content: v }), 200);
+                }}
+                onBlur={(e) => {
+                  // Immediate commit on blur so value is always saved before switching pages
+                  if (contentDebounceRef.current) clearTimeout(contentDebounceRef.current);
+                  updateText(sel.id, { content: e.target.value });
+                }}
+                rows={4}
+                style={{ width: "100%", background: "#1A1A1A", border: "1px solid #333", borderRadius: 6, padding: 8, color: "#E0E0E0", fontSize: 13, resize: "vertical", marginBottom: 12, fontFamily: "monospace" }}
+              />
 
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 12 }}>
                 <div>
@@ -1460,8 +2015,8 @@ export default function TemplateEditor() {
                     <input type="color" value={sel.boxFillColor ?? "#0F172A"} onChange={(e) => updateText(sel.id, { boxFillColor: e.target.value })} style={{ width: "100%", height: 28, border: "none", borderRadius: 4, cursor: "pointer" }} />
                   </div>
                   <div>
-                    <label style={{ fontSize: 10, color: "#666" }}>Fill opacity</label>
-                    <input type="range" min="0" max="1" step="0.05" value={sel.boxFillOpacity ?? 0} onChange={(e) => updateText(sel.id, { boxFillOpacity: parseFloat(e.target.value) })} style={{ width: "100%", marginTop: 8 }} />
+                    <label style={{ fontSize: 10, color: "#666" }}>{sel.boxFadeEdges ? "Peak opacity" : "Fill opacity"}</label>
+                    <input type="range" min="0" max="1" step="0.05" value={sel.boxFillOpacity ?? 0} onChange={(e) => sliderUpdate(sel.id, { boxFillOpacity: parseFloat(e.target.value) })} style={{ width: "100%", marginTop: 8 }} />
                   </div>
                 </div>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
@@ -1471,7 +2026,7 @@ export default function TemplateEditor() {
                   </div>
                   <div>
                     <label style={{ fontSize: 10, color: "#666" }}>Border opacity</label>
-                    <input type="range" min="0" max="1" step="0.05" value={sel.boxBorderOpacity ?? 0} onChange={(e) => updateText(sel.id, { boxBorderOpacity: parseFloat(e.target.value) })} style={{ width: "100%", marginTop: 8 }} />
+                    <input type="range" min="0" max="1" step="0.05" value={sel.boxBorderOpacity ?? 0} onChange={(e) => sliderUpdate(sel.id, { boxBorderOpacity: parseFloat(e.target.value) })} style={{ width: "100%", marginTop: 8 }} />
                   </div>
                 </div>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 6 }}>
@@ -1494,6 +2049,7 @@ export default function TemplateEditor() {
                 </div>
               </div>
 
+              {/* ── Font ──────────────────────────────────────────────────── */}
               <label style={{ fontSize: 11, color: "#888" }}>Font</label>
               <FontPicker
                 value={sel.font}
@@ -1532,12 +2088,86 @@ export default function TemplateEditor() {
                   <div key={c.value} onClick={() => updateText(sel.id, { color: c.value })} title={c.name} style={{ width: 28, height: 28, borderRadius: 6, background: c.preview, border: sel.color === c.value ? "2px solid #F5D478" : "2px solid #333", cursor: "pointer" }} />
                 ))}
               </div>
+              {/* Custom solid color */}
               {sel.color === "custom" && (
-                <input type="color" value={sel.customColor}
-                  onChange={(e) => updateText(sel.id, { customColor: e.target.value })}
-                  onBlur={(e) => addRecentColor(e.target.value)}
-                  style={{ width: "100%", height: 32, border: "none", borderRadius: 6, cursor: "pointer", marginBottom: 8 }} />
+                <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 8 }}>
+                  <input type="color" value={sel.customColor}
+                    onChange={(e) => updateText(sel.id, { customColor: e.target.value })}
+                    onBlur={(e) => addRecentColor(e.target.value)}
+                    style={{ width: 36, height: 32, border: "none", borderRadius: 6, cursor: "pointer", flexShrink: 0 }} />
+                  <input type="text" value={(sel.customColor ?? "#FFFFFF").toUpperCase()} maxLength={7}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      if (/^#[0-9A-Fa-f]{0,6}$/.test(v)) updateText(sel.id, { customColor: v });
+                    }}
+                    onBlur={(e) => { if (/^#[0-9A-Fa-f]{6}$/.test(e.target.value)) addRecentColor(e.target.value); }}
+                    style={{ flex: 1, background: "#1A1A1A", border: "1px solid #333", borderRadius: 6, padding: "4px 8px", color: "#E0E0E0", fontSize: 12, fontFamily: "monospace" }} />
+                  <button onClick={() => void copyToClipboard((sel.customColor ?? "#FFFFFF").toUpperCase())}
+                    style={{ background: "#1A1A1A", border: "1px solid #333", borderRadius: 4, padding: "4px 8px", color: "#888", fontSize: 10, cursor: "pointer", flexShrink: 0 }}>Copy</button>
+                </div>
               )}
+              {/* Custom gradient editor */}
+              {sel.color === "custom_gradient" && (
+                <div style={{ marginBottom: 8 }}>
+                  {/* Preview bar */}
+                  <div style={{
+                    height: 20, borderRadius: 6, marginBottom: 8,
+                    background: `linear-gradient(${sel.customGradientAngle ?? 180}deg, ${sel.customGradientStart ?? "#FF8C00"}, ${sel.customGradientEnd ?? "#FFD700"})`,
+                    border: "1px solid #333",
+                  }} />
+                  {/* Start + End color pickers */}
+                  <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: 10, color: "#666", marginBottom: 4 }}>Start color</div>
+                      <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+                        <input type="color" value={sel.customGradientStart ?? "#FF8C00"}
+                          onChange={(e) => updateText(sel.id, { customGradientStart: e.target.value })}
+                          style={{ width: 32, height: 28, border: "none", borderRadius: 4, cursor: "pointer", flexShrink: 0 }} />
+                        <input type="text" value={(sel.customGradientStart ?? "#FF8C00").toUpperCase()} maxLength={7}
+                          onChange={(e) => { if (/^#[0-9A-Fa-f]{0,6}$/.test(e.target.value)) updateText(sel.id, { customGradientStart: e.target.value }); }}
+                          style={{ flex: 1, background: "#1A1A1A", border: "1px solid #333", borderRadius: 4, padding: "3px 6px", color: "#E0E0E0", fontSize: 11, fontFamily: "monospace", minWidth: 0 }} />
+                      </div>
+                    </div>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: 10, color: "#666", marginBottom: 4 }}>End color</div>
+                      <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+                        <input type="color" value={sel.customGradientEnd ?? "#FFD700"}
+                          onChange={(e) => updateText(sel.id, { customGradientEnd: e.target.value })}
+                          style={{ width: 32, height: 28, border: "none", borderRadius: 4, cursor: "pointer", flexShrink: 0 }} />
+                        <input type="text" value={(sel.customGradientEnd ?? "#FFD700").toUpperCase()} maxLength={7}
+                          onChange={(e) => { if (/^#[0-9A-Fa-f]{0,6}$/.test(e.target.value)) updateText(sel.id, { customGradientEnd: e.target.value }); }}
+                          style={{ flex: 1, background: "#1A1A1A", border: "1px solid #333", borderRadius: 4, padding: "3px 6px", color: "#E0E0E0", fontSize: 11, fontFamily: "monospace", minWidth: 0 }} />
+                      </div>
+                    </div>
+                  </div>
+                  {/* Angle control */}
+                  <div style={{ fontSize: 10, color: "#666", marginBottom: 4 }}>Direction</div>
+                  <div style={{ display: "flex", gap: 4, alignItems: "center", marginBottom: 6 }}>
+                    {[[0,"↑"],[90,"→"],[180,"↓"],[270,"←"],[135,"↘"],[315,"↗"]].map(([a, icon]) => (
+                      <button key={a} onClick={() => updateText(sel.id, { customGradientAngle: a })}
+                        style={{ flex: 1, padding: "4px 0", borderRadius: 4, border: "none", background: (sel.customGradientAngle ?? 180) === a ? "#F5D478" : "#2A2A2A", color: (sel.customGradientAngle ?? 180) === a ? "#000" : "#888", fontSize: 14, cursor: "pointer" }}>{icon}</button>
+                    ))}
+                  </div>
+                  <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                    <input type="range" min={0} max={359} value={sel.customGradientAngle ?? 180}
+                      onChange={(e) => sliderUpdate(sel.id, { customGradientAngle: Number(e.target.value) })}
+                      style={{ flex: 1 }} />
+                    <span style={{ fontSize: 11, color: "#aaa", fontFamily: "monospace", width: 36, textAlign: "right" }}>{sel.customGradientAngle ?? 180}°</span>
+                  </div>
+                </div>
+              )}
+              {/* For preset gradients: show representative hex */}
+              {sel.color !== "custom" && sel.color !== "custom_gradient" && (() => {
+                const hexVal = GRADIENT_COLOR_MAP[sel.color] ?? sel.color ?? "#FFFFFF";
+                return (
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8 }}>
+                    <div style={{ width: 18, height: 18, borderRadius: 4, background: hexVal, border: "1px solid #444", flexShrink: 0 }} />
+                    <span style={{ fontSize: 11, color: "#555", fontFamily: "monospace", flex: 1 }}>{hexVal.toUpperCase()}</span>
+                    <button onClick={() => void copyToClipboard(hexVal.toUpperCase())}
+                      style={{ background: "#1A1A1A", border: "1px solid #333", borderRadius: 4, padding: "2px 8px", color: "#888", fontSize: 10, cursor: "pointer" }}>Copy</button>
+                  </div>
+                );
+              })()}
 
               {/* ── Texture fill ─────────────────────────────────────────── */}
               <label style={{ fontSize: 11, color: "#888" }}>Texture fill</label>
@@ -1554,41 +2184,178 @@ export default function TemplateEditor() {
                 ) : (
                   <label style={{ flex: 1, background: "#1A1A1A", border: "1px dashed #444", borderRadius: 6, padding: "6px 12px", color: "#888", fontSize: 12, cursor: "pointer", textAlign: "center" }}>
                     + Upload texture image
-                    <input type="file" accept="image/*" onChange={handleTextureUpload} style={{ display: "none" }} />
+                    <input type="file" accept="image/*" onChange={handleTextureUpload("textureImage", "Add texture")} style={{ display: "none" }} />
                   </label>
                 )}
               </div>
 
-              <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
-                <button onClick={() => updateText(sel.id, { bold: !sel.bold })} style={{ flex: 1, background: sel.bold ? "#333" : "#1A1A1A", border: "1px solid #444", borderRadius: 6, padding: "6px 0", color: sel.bold ? "#F5D478" : "#888", fontSize: 13, cursor: "pointer", fontWeight: "bold" }}>B</button>
-                <button onClick={() => updateText(sel.id, { italic: !sel.italic })} style={{ flex: 1, background: sel.italic ? "#333" : "#1A1A1A", border: "1px solid #444", borderRadius: 6, padding: "6px 0", color: sel.italic ? "#F5D478" : "#888", fontSize: 13, cursor: "pointer", fontStyle: "italic" }}>I</button>
-                <button onClick={() => updateText(sel.id, { shadow: !sel.shadow })} style={{ flex: 1, background: sel.shadow ? "#333" : "#1A1A1A", border: "1px solid #444", borderRadius: 6, padding: "6px 0", color: sel.shadow ? "#F5D478" : "#888", fontSize: 13, cursor: "pointer" }}>S</button>
+              {/* Typography style row — B / I / U + Transform */}
+              <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+                <button onClick={() => updateText(sel.id, { bold: !sel.bold })} title="Bold" style={{ flex: 1, background: sel.bold ? "#2C2400" : "#1A1A1A", border: `1px solid ${sel.bold ? "#F5D478" : "#333"}`, borderRadius: 6, padding: "7px 0", color: sel.bold ? "#F5D478" : "#666", fontSize: 14, cursor: "pointer", fontWeight: "bold" }}>B</button>
+                <button onClick={() => updateText(sel.id, { italic: !sel.italic })} title="Italic" style={{ flex: 1, background: sel.italic ? "#2C2400" : "#1A1A1A", border: `1px solid ${sel.italic ? "#F5D478" : "#333"}`, borderRadius: 6, padding: "7px 0", color: sel.italic ? "#F5D478" : "#666", fontSize: 14, cursor: "pointer", fontStyle: "italic" }}>I</button>
+                <button onClick={() => updateText(sel.id, { underline: !sel.underline })} title="Underline" style={{ flex: 1, background: sel.underline ? "#2C2400" : "#1A1A1A", border: `1px solid ${sel.underline ? "#F5D478" : "#333"}`, borderRadius: 6, padding: "7px 0", color: sel.underline ? "#F5D478" : "#666", fontSize: 14, cursor: "pointer", textDecoration: "underline" }}>U</button>
+              </div>
+              {/* Text Transform row */}
+              <div style={{ display: "flex", gap: 6, marginBottom: 16 }}>
+                {[["none","Aa","Normal"],["uppercase","AA","Caps"],["lowercase","aa","lower"],["capitalize","Ab","Title"]].map(([val,lbl,tip]) => (
+                  <button key={val} onClick={() => updateText(sel.id, { textTransform: val })} title={tip}
+                    style={{ flex: 1, background: (sel.textTransform ?? "none") === val ? "#2C2400" : "#1A1A1A", border: `1px solid ${(sel.textTransform ?? "none") === val ? "#F5D478" : "#333"}`, borderRadius: 6, padding: "5px 0", color: (sel.textTransform ?? "none") === val ? "#F5D478" : "#555", fontSize: 11, cursor: "pointer" }}>
+                    {lbl}
+                  </button>
+                ))}
               </div>
 
+              {/* Effects section header */}
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+                <span style={{ fontSize: 11, fontWeight: 600, color: "#666", textTransform: "uppercase", letterSpacing: "0.08em" }}>Effects</span>
+                <div style={{ flex: 1, height: 1, background: "#222" }} />
+              </div>
+
+              {/* Effect toggle cards — Canva-style 2×2 grid */}
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 12 }}>
+                <button onClick={() => updateText(sel.id, { shadow: !sel.shadow })}
+                  style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4, padding: "10px 8px", background: sel.shadow ? "#1C1800" : "#161616", border: `1.5px solid ${sel.shadow ? "#F5D478" : "#2A2A2A"}`, borderRadius: 8, cursor: "pointer", transition: "all 0.15s" }}>
+                  <span style={{ fontSize: 16, lineHeight: 1 }}>🌑</span>
+                  <span style={{ fontSize: 11, color: sel.shadow ? "#F5D478" : "#555", fontWeight: sel.shadow ? 600 : 400 }}>Shadow</span>
+                </button>
+                <button onClick={() => updateText(sel.id, { stroke: !sel.stroke })}
+                  style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4, padding: "10px 8px", background: sel.stroke ? "#001820" : "#161616", border: `1.5px solid ${sel.stroke ? "#7EC8E3" : "#2A2A2A"}`, borderRadius: 8, cursor: "pointer", transition: "all 0.15s" }}>
+                  <span style={{ fontSize: 16, lineHeight: 1 }}>⬡</span>
+                  <span style={{ fontSize: 11, color: sel.stroke ? "#7EC8E3" : "#555", fontWeight: sel.stroke ? 600 : 400 }}>Outline</span>
+                </button>
+                <button onClick={() => updateText(sel.id, { bevel: !sel.bevel })}
+                  style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4, padding: "10px 8px", background: sel.bevel ? "#1A0E00" : "#161616", border: `1.5px solid ${sel.bevel ? "#E8A055" : "#2A2A2A"}`, borderRadius: 8, cursor: "pointer", transition: "all 0.15s" }}>
+                  <span style={{ fontSize: 16, lineHeight: 1 }}>🔲</span>
+                  <span style={{ fontSize: 11, color: sel.bevel ? "#E8A055" : "#555", fontWeight: sel.bevel ? 600 : 400 }}>3D Bevel</span>
+                </button>
+                <button onClick={() => updateText(sel.id, { glow: !sel.glow })}
+                  style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4, padding: "10px 8px", background: sel.glow ? "#1A1600" : "#161616", border: `1.5px solid ${sel.glow ? "#FFD700" : "#2A2A2A"}`, borderRadius: 8, cursor: "pointer", transition: "all 0.15s" }}>
+                  <span style={{ fontSize: 16, lineHeight: 1 }}>✨</span>
+                  <span style={{ fontSize: 11, color: sel.glow ? "#FFD700" : "#555", fontWeight: sel.glow ? 600 : 400 }}>Glow</span>
+                </button>
+              </div>
+
+              {/* Shadow controls */}
               {sel.shadow && (
-                <div style={{ background: "#151515", borderRadius: 8, padding: 10, marginBottom: 12 }}>
-                  <label style={{ fontSize: 11, color: "#888" }}>Shadow settings</label>
-                  <div style={{ marginTop: 6, marginBottom: 8 }}>
-                    <label style={{ fontSize: 10, color: "#666" }}>Shadow opacity</label>
-                    <input type="range" min="0" max="1" step="0.05" value={sel.shadowOpacity ?? 0.5} onChange={(e) => updateText(sel.id, { shadowOpacity: parseFloat(e.target.value) })} style={{ width: "100%", marginTop: 8 }} />
+                <div style={{ background: "#111", border: "1px solid #222", borderRadius: 8, padding: 10, marginBottom: 10 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8 }}>
+                    <span style={{ fontSize: 10, color: "#F5D478", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em" }}>Shadow</span>
                   </div>
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6, marginTop: 4 }}>
+                  <div style={{ marginBottom: 8 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <label style={{ fontSize: 10, color: "#555" }}>Opacity</label>
+                      <span style={{ fontSize: 10, color: "#888", fontVariantNumeric: "tabular-nums" }}>{Math.round((sel.shadowOpacity ?? 0.5) * 100)}%</span>
+                    </div>
+                    <input type="range" min="0" max="1" step="0.05" value={sel.shadowOpacity ?? 0.5} onChange={(e) => sliderUpdate(sel.id, { shadowOpacity: parseFloat(e.target.value) })} style={{ width: "100%", marginTop: 4, accentColor: "#F5D478" }} />
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6, marginBottom: 8 }}>
                     <div>
-                      <label style={{ fontSize: 10, color: "#666" }}>Blur</label>
-                      <NumericField value={sel.shadowBlur} onCommit={(value) => updateText(sel.id, { shadowBlur: Math.max(0, value) })} min={0} step="0.1" style={{ width: "100%", background: "#1A1A1A", border: "1px solid #333", borderRadius: 4, padding: "3px 6px", color: "#E0E0E0", fontSize: 12 }} />
+                      <label style={{ fontSize: 10, color: "#555" }}>Blur</label>
+                      <NumericField value={sel.shadowBlur} onCommit={(value) => updateText(sel.id, { shadowBlur: Math.max(0, value) })} min={0} step="0.1" style={{ width: "100%", background: "#1A1A1A", border: "1px solid #2A2A2A", borderRadius: 4, padding: "3px 6px", color: "#E0E0E0", fontSize: 12 }} />
                     </div>
                     <div>
-                      <label style={{ fontSize: 10, color: "#666" }}>Offset X</label>
-                      <NumericField value={sel.shadowOffsetX} onCommit={(value) => updateText(sel.id, { shadowOffsetX: value })} step="0.1" style={{ width: "100%", background: "#1A1A1A", border: "1px solid #333", borderRadius: 4, padding: "3px 6px", color: "#E0E0E0", fontSize: 12 }} />
+                      <label style={{ fontSize: 10, color: "#555" }}>X</label>
+                      <NumericField value={sel.shadowOffsetX} onCommit={(value) => updateText(sel.id, { shadowOffsetX: value })} step="0.1" style={{ width: "100%", background: "#1A1A1A", border: "1px solid #2A2A2A", borderRadius: 4, padding: "3px 6px", color: "#E0E0E0", fontSize: 12 }} />
                     </div>
                     <div>
-                      <label style={{ fontSize: 10, color: "#666" }}>Offset Y</label>
-                      <NumericField value={sel.shadowOffsetY} onCommit={(value) => updateText(sel.id, { shadowOffsetY: value })} step="0.1" style={{ width: "100%", background: "#1A1A1A", border: "1px solid #333", borderRadius: 4, padding: "3px 6px", color: "#E0E0E0", fontSize: 12 }} />
+                      <label style={{ fontSize: 10, color: "#555" }}>Y</label>
+                      <NumericField value={sel.shadowOffsetY} onCommit={(value) => updateText(sel.id, { shadowOffsetY: value })} step="0.1" style={{ width: "100%", background: "#1A1A1A", border: "1px solid #2A2A2A", borderRadius: 4, padding: "3px 6px", color: "#E0E0E0", fontSize: 12 }} />
                     </div>
                   </div>
-                  <div style={{ marginTop: 6 }}>
-                    <label style={{ fontSize: 10, color: "#666" }}>Shadow color</label>
-                    <input type="color" value={sel.shadowColor} onChange={(e) => updateText(sel.id, { shadowColor: e.target.value })} style={{ width: "100%", height: 24, border: "none", borderRadius: 4, cursor: "pointer" }} />
+                  <label style={{ fontSize: 10, color: "#555" }}>Color</label>
+                  <input type="color" value={sel.shadowColor} onChange={(e) => updateText(sel.id, { shadowColor: e.target.value })} style={{ width: "100%", height: 28, border: "none", borderRadius: 4, cursor: "pointer", marginTop: 3 }} />
+                </div>
+              )}
+
+              {/* Stroke / Outline controls */}
+              {sel.stroke && (
+                <div style={{ background: "#111", border: "1px solid #1A2A30", borderRadius: 8, padding: 10, marginBottom: 10 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8 }}>
+                    <span style={{ fontSize: 10, color: "#7EC8E3", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em" }}>Outline</span>
+                  </div>
+                  <div style={{ marginBottom: 8 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <label style={{ fontSize: 10, color: "#555" }}>Opacity</label>
+                      <span style={{ fontSize: 10, color: "#888", fontVariantNumeric: "tabular-nums" }}>{Math.round((sel.strokeOpacity ?? 1) * 100)}%</span>
+                    </div>
+                    <input type="range" min="0" max="1" step="0.05" value={sel.strokeOpacity ?? 1} onChange={(e) => sliderUpdate(sel.id, { strokeOpacity: parseFloat(e.target.value) })} style={{ width: "100%", marginTop: 4, accentColor: "#7EC8E3" }} />
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 8 }}>
+                    <div>
+                      <label style={{ fontSize: 10, color: "#555" }}>Width (px)</label>
+                      <NumericField value={sel.strokeWidth ?? 4} onCommit={(value) => updateText(sel.id, { strokeWidth: Math.max(0.5, value) })} min={0.5} step="0.5" style={{ width: "100%", background: "#1A1A1A", border: "1px solid #2A2A2A", borderRadius: 4, padding: "3px 6px", color: "#E0E0E0", fontSize: 12 }} />
+                    </div>
+                    <div>
+                      <label style={{ fontSize: 10, color: "#555" }}>Color</label>
+                      <input type="color" value={sel.strokeColor ?? "#000000"} onChange={(e) => updateText(sel.id, { strokeColor: e.target.value })} style={{ width: "100%", height: 28, border: "none", borderRadius: 4, cursor: "pointer", marginTop: 2 }} />
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Bevel / 3D Emboss controls */}
+              {sel.bevel && (
+                <div style={{ background: "#111", border: "1px solid #2A1A00", borderRadius: 8, padding: 10, marginBottom: 10 }}>
+                  <span style={{ fontSize: 10, color: "#E8A055", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", display: "block", marginBottom: 8 }}>3D Bevel</span>
+                  <div style={{ marginBottom: 8 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <label style={{ fontSize: 10, color: "#555" }}>Depth</label>
+                      <span style={{ fontSize: 10, color: "#888", fontVariantNumeric: "tabular-nums" }}>{sel.bevelDepth ?? 4}px</span>
+                    </div>
+                    <input type="range" min="1" max="16" step="1" value={sel.bevelDepth ?? 4} onChange={(e) => sliderUpdate(sel.id, { bevelDepth: parseInt(e.target.value) })} style={{ width: "100%", marginTop: 4, accentColor: "#E8A055" }} />
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 8 }}>
+                    <div>
+                      <label style={{ fontSize: 10, color: "#555" }}>Highlight</label>
+                      <input type="color" value={sel.bevelHighlight ?? "#FFFFFF"} onChange={(e) => updateText(sel.id, { bevelHighlight: e.target.value })} style={{ width: "100%", height: 28, border: "none", borderRadius: 4, cursor: "pointer", marginTop: 2 }} />
+                    </div>
+                    <div>
+                      <label style={{ fontSize: 10, color: "#555" }}>Shadow</label>
+                      <input type="color" value={sel.bevelShadow ?? "#000000"} onChange={(e) => updateText(sel.id, { bevelShadow: e.target.value })} style={{ width: "100%", height: 28, border: "none", borderRadius: 4, cursor: "pointer", marginTop: 2 }} />
+                    </div>
+                  </div>
+                  {/* Bevel texture fill */}
+                  <div>
+                    <label style={{ fontSize: 10, color: "#555", display: "block", marginBottom: 4 }}>Depth Texture</label>
+                    {sel.bevelTexture ? (
+                      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        <div style={{ width: 36, height: 28, borderRadius: 4, overflow: "hidden", border: "1px solid #333", flexShrink: 0 }}>
+                          <img src={sel.bevelTexture} alt="bevel texture" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                        </div>
+                        <span style={{ fontSize: 10, color: "#E8A055", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>Active</span>
+                        <button onClick={() => { saveHistory("Remove bevel texture"); updateText(sel.id, { bevelTexture: null }); }} style={{ fontSize: 10, background: "#2A0A0A", border: "1px solid #5A1A1A", borderRadius: 4, color: "#FF6B6B", padding: "2px 6px", cursor: "pointer" }}>Remove</button>
+                      </div>
+                    ) : (
+                      <label style={{ display: "flex", alignItems: "center", gap: 6, background: "#1A1A1A", border: "1px solid #2A2A2A", borderRadius: 4, padding: "4px 8px", cursor: "pointer" }}>
+                        <span style={{ fontSize: 14 }}>🪵</span>
+                        <span style={{ fontSize: 10, color: "#888" }}>Upload texture…</span>
+                        <input type="file" accept="image/*" onChange={handleTextureUpload("bevelTexture", "Add bevel texture")} style={{ display: "none" }} />
+                      </label>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Glow controls */}
+              {sel.glow && (
+                <div style={{ background: "#111", border: "1px solid #2A2200", borderRadius: 8, padding: 10, marginBottom: 10 }}>
+                  <span style={{ fontSize: 10, color: "#FFD700", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", display: "block", marginBottom: 8 }}>Glow</span>
+                  <div style={{ marginBottom: 8 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <label style={{ fontSize: 10, color: "#555" }}>Opacity</label>
+                      <span style={{ fontSize: 10, color: "#888", fontVariantNumeric: "tabular-nums" }}>{Math.round((sel.glowOpacity ?? 0.85) * 100)}%</span>
+                    </div>
+                    <input type="range" min="0" max="1" step="0.05" value={sel.glowOpacity ?? 0.85} onChange={(e) => sliderUpdate(sel.id, { glowOpacity: parseFloat(e.target.value) })} style={{ width: "100%", marginTop: 4, accentColor: "#FFD700" }} />
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+                    <div>
+                      <label style={{ fontSize: 10, color: "#555" }}>Blur radius</label>
+                      <NumericField value={sel.glowBlur ?? 20} onCommit={(value) => updateText(sel.id, { glowBlur: Math.max(1, value) })} min={1} max={80} step="1" style={{ width: "100%", background: "#1A1A1A", border: "1px solid #2A2A2A", borderRadius: 4, padding: "3px 6px", color: "#E0E0E0", fontSize: 12 }} />
+                    </div>
+                    <div>
+                      <label style={{ fontSize: 10, color: "#555" }}>Color</label>
+                      <input type="color" value={sel.glowColor ?? "#FFD700"} onChange={(e) => updateText(sel.id, { glowColor: e.target.value })} style={{ width: "100%", height: 28, border: "none", borderRadius: 4, cursor: "pointer", marginTop: 2 }} />
+                    </div>
                   </div>
                 </div>
               )}
@@ -1600,14 +2367,10 @@ export default function TemplateEditor() {
                 </div>
                 <div>
                   <label style={{ fontSize: 11, color: "#888" }}>Opacity</label>
-                  <input type="range" min="0" max="1" step="0.05" value={sel.opacity} onChange={(e) => updateText(sel.id, { opacity: parseFloat(e.target.value) })} style={{ width: "100%", marginTop: 8 }} />
+                  <input type="range" min="0" max="1" step="0.05" value={sel.opacity} onChange={(e) => sliderUpdate(sel.id, { opacity: parseFloat(e.target.value) })} style={{ width: "100%", marginTop: 8 }} />
                 </div>
               </div>
 
-              <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
-                <input type="checkbox" checked={sel.autoScale} onChange={(e) => updateText(sel.id, { autoScale: e.target.checked })} id="autoscale" />
-                <label htmlFor="autoscale" style={{ fontSize: 12, color: "#aaa" }}>Auto-scale long names</label>
-              </div>
             </>
           ) : (
             <div style={{ color: "#555", fontSize: 13, textAlign: "center", marginTop: 40 }}>
@@ -1617,19 +2380,57 @@ export default function TemplateEditor() {
         </div>
       </div>
 
+      {/* Batch export progress toast — persists outside the export modal */}
+      {batchExporting && (
+        <div style={{ position: "fixed", bottom: 24, left: "50%", transform: "translateX(-50%)", background: "#141414", border: "1px solid #16a34a", borderRadius: 12, padding: "14px 22px", zIndex: 9999, display: "flex", alignItems: "center", gap: 14, boxShadow: "0 8px 32px rgba(0,0,0,0.6)", minWidth: 300 }}>
+          <span style={{ fontSize: 22 }}>⏳</span>
+          <div style={{ flex: 1 }}>
+            <div style={{ color: "#6ee7b7", fontWeight: 600, fontSize: 13, marginBottom: 6 }}>
+              {batchProgress.done < batchProgress.total
+                ? `Rendering page ${batchProgress.done} / ${batchProgress.total}`
+                : "Packaging ZIP…"}
+            </div>
+            <div style={{ height: 4, background: "#333", borderRadius: 2, overflow: "hidden" }}>
+              <div style={{ height: "100%", background: "linear-gradient(90deg, #16a34a, #4ade80)", borderRadius: 2, width: `${batchProgress.total > 0 ? Math.round((batchProgress.done / batchProgress.total) * 100) : 0}%`, transition: "width 0.25s ease" }} />
+            </div>
+          </div>
+        </div>
+      )}
+
       {showExport && (
         <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 999 }} onClick={() => setShowExport(false)}>
           <div onClick={(e) => e.stopPropagation()} style={{ background: "#1A1A1A", borderRadius: 12, padding: 24, width: 600, maxHeight: "80vh", display: "flex", flexDirection: "column" }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-              <span style={{ fontSize: 16, fontWeight: 600, color: "#F5D478" }}>Current JSON preview</span>
+              <span style={{ fontSize: 16, fontWeight: 600, color: "#F5D478" }}>Export JSON</span>
               <button onClick={() => setShowExport(false)} style={{ background: "none", border: "none", color: "#888", fontSize: 18, cursor: "pointer" }}>X</button>
+            </div>
+            <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+              <button
+                onClick={() => generateExport("current")}
+                style={{ flex: 1, padding: "7px 0", borderRadius: 6, border: "none", background: exportMode === "current" ? "#F5D478" : "#2A2A2A", color: exportMode === "current" ? "#000" : "#888", fontWeight: 600, fontSize: 13, cursor: "pointer" }}
+              >当前页 Page {currentPage + 1}</button>
+              <button
+                onClick={() => generateExport("all")}
+                style={{ flex: 1, padding: "7px 0", borderRadius: 6, border: "none", background: exportMode === "all" ? "#F5D478" : "#2A2A2A", color: exportMode === "all" ? "#000" : "#888", fontWeight: 600, fontSize: 13, cursor: "pointer" }}
+              >全部页 All {pages.length} pages</button>
             </div>
             <pre style={{ background: "#111", borderRadius: 8, padding: 16, fontSize: 12, color: "#aaa", overflow: "auto", flex: 1, maxHeight: "50vh", fontFamily: "monospace", lineHeight: 1.5 }}>{exportJSON}</pre>
             <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-              <button onClick={downloadJSON} style={{ flex: 2, background: "linear-gradient(135deg, #F5D478, #A67620)", color: "#000", border: "none", borderRadius: 8, padding: "10px 0", fontSize: 14, fontWeight: 600, cursor: "pointer" }}>⬇ Download {storyId}_template.json</button>
+              <button onClick={downloadJSON} style={{ flex: 2, background: "linear-gradient(135deg, #F5D478, #A67620)", color: "#000", border: "none", borderRadius: 8, padding: "10px 0", fontSize: 14, fontWeight: 600, cursor: "pointer" }}>⬇ Download JSON</button>
               <button onClick={() => { void copyToClipboard(exportJSON); }} style={{ flex: 1, background: "#333", color: "#E0E0E0", border: "none", borderRadius: 8, padding: "10px 0", fontSize: 13, cursor: "pointer" }}>Copy JSON</button>
             </div>
-            <button onClick={() => { setShowExport(false); void exportPNG(); }} style={{ width: "100%", marginTop: 8, background: "#1e3a5f", color: "#7dd3fc", border: "1px solid #2563eb", borderRadius: 8, padding: "10px 0", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>🖼 Export current page as PNG preview</button>
+            <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+              <button onClick={() => { setShowExport(false); void exportPNG(); }} style={{ flex: 1, background: "#1e3a5f", color: "#7dd3fc", border: "1px solid #2563eb", borderRadius: 8, padding: "10px 0", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>🖼 Export current page PNG</button>
+              <button
+                onClick={() => { setShowExport(false); void exportAllPNG(); }}
+                disabled={batchExporting}
+                style={{ flex: 1, background: batchExporting ? "#1a2a1a" : "#0d2d0d", color: batchExporting ? "#4a7a4a" : "#6ee7b7", border: "1px solid #16a34a", borderRadius: 8, padding: "10px 0", fontSize: 13, fontWeight: 600, cursor: batchExporting ? "not-allowed" : "pointer" }}
+              >
+                {batchExporting
+                  ? `⏳ ${batchProgress.done}/${batchProgress.total} rendered…`
+                  : `📦 Export all as ZIP (${pages.filter(p => p.image).length} pages)`}
+              </button>
+            </div>
           </div>
         </div>
       )}

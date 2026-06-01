@@ -6,5 +6,7 @@ export default defineConfig({
   plugins: [react()],
   build: {
     outDir: 'dist-web',
+    // Inline fonts ≤500KB as base64 — same as desktop build, avoids font-path issues on GH Pages
+    assetsInlineLimit: 500000,
   },
 })

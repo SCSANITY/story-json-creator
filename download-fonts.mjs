@@ -16,78 +16,76 @@ const FONTS_DIR = path.join(__dirname, "assets", "fonts");
 
 // All font families to download (name + weights/styles needed)
 const FONT_FAMILIES = [
-  // ── Existing fonts ──────────────────────────────────────────────────────────
-  "Playfair+Display:ital,wght@0,400;0,700;1,400",
-  "Cinzel:wght@400;700",
-  "Abril+Fatface",
-  "Cormorant+Garamond:ital,wght@0,400;0,700;1,400",
-  "Righteous",
-  "Pacifico",
-  "Dancing+Script:wght@400;700",
-  "Satisfy",
-  "Lora:ital,wght@0,400;0,700;1,400",
-  "Merriweather:ital,wght@0,400;0,700;1,400",
+  // ── 📖 Classic Serif ─────────────────────────────────────────────────────────
+  "Lora:ital,wght@0,400;0,700;1,400",                // Warm balanced narrative serif
+  "EB+Garamond:ital,wght@0,400;0,700;1,400",         // Timeless classic Garamond
+  "Cormorant+Garamond:ital,wght@0,400;0,700;1,400",  // Ornate luxury high-contrast
+  "Fraunces:ital,wght@0,400;0,700;1,400",            // Optical personality serif
 
-  // ── Fantasy / Storybook ─────────────────────────────────────────────────────
-  "Uncial+Antiqua",           // Celtic / medieval manuscript
-  "MedievalSharp",            // Sharp gothic
-  "Jim+Nightshade",           // Dark fairy-tale swash
+  // ── ✨ Elegant Display ────────────────────────────────────────────────────────
+  "Cinzel:wght@400;700",                              // Roman grand engraving
+  "Cinzel+Decorative:wght@400;900",                  // More ornate Cinzel variant
+  "Playfair+Display:ital,wght@0,400;0,700;1,400",    // Premium editorial serif
+  "Bodoni+Moda:ital,wght@0,400;0,700;1,400",         // High fashion editorial
+  "Josefin+Sans:wght@400;700",                        // Clean metallic all-caps sans
+  "Italiana",                                         // Ultra thin elegant italic serif
+  "Yeseva+One",                                       // Stylized bold display serif
 
-  // ── Cute / Children's book ──────────────────────────────────────────────────
-  "Fredoka+One",              // Rounded friendly — most popular kids font
-  "Chewy",                    // Playful bounce
-  "Bubblegum+Sans",           // Bubbly cute
-  "Boogaloo",                 // Fun casual
-  "Lilita+One",               // Bold rounded impact
-  "Baloo+2:wght@400;700",     // Friendly bold multilingual
+  // ── 🎨 Modern Design ─────────────────────────────────────────────────────────
+  "Montserrat:wght@400;600;700;900",                  // Canva #1 global font
+  "Poppins:wght@400;600;700",                         // Canva geometric sans favourite
+  "Raleway:wght@400;600;700",                         // Elegant geometric brand sans
+  "Space+Grotesk:wght@400;500;700",                   // Modern editorial sans
+  "Syne:wght@400;700;800",                            // Experimental display sans
+  "Unbounded:wght@400;700",                           // Modern rounded display
+  "Outfit:wght@400;600;700",                          // Contemporary geometric sans
 
-  // ── Calligraphy / Script ────────────────────────────────────────────────────
-  "Great+Vibes",              // Elegant thin calligraphy
-  "Kaushan+Script",           // Handwritten artistic flair
-  "Lobster",                  // Retro rounded script
-  "Sacramento",               // Thin flowing calligraphy
-  "Alex+Brush",               // Delicate brush script
 
-  // ── Bold Display / Impact ───────────────────────────────────────────────────
-  "Bebas+Neue",               // Strong all-caps modern
-  "Yeseva+One",               // Bold decorative serif
-  "Titan+One",                // Extra-fat rounded display
+  // ── 🎪 Bold Title ─────────────────────────────────────────────────────────────
+  "Ultra",                                            // Mega-thick slab serif
+  "DM+Serif+Display:ital,wght@0,400;1,400",          // High-contrast modern serif
+  "Poiret+One",                                       // Art Deco geometric elegant
+  "Abril+Fatface",                                    // High-contrast impact display
+  "Russo+One",                                        // Bold condensed modern
+  "Lobster+Two:ital,wght@0,400;1,400",               // Classic Lobster variant
+  "Pacifico",                                         // Casual round brush display
 
-  // ── Classic / Literary ──────────────────────────────────────────────────────
-  "Philosopher:ital,wght@0,400;0,700;1,400",  // Elegant humanist serif
-  "IM+Fell+English:ital@0;1",                 // Old English typeface style
 
-  // ── Title Display / 大标题专用 ──────────────────────────────────────────────
-  "Cinzel+Decorative:wght@400;900",   // Ornate Roman caps (more ornate than Cinzel)
-  "UnifrakturMaguntia",               // Blackletter / Gothic
-  "Pirata+One",                       // Pirate / adventure
-  "Rye",                              // Wild West vintage poster
-  "Skranji",                          // Nordic / runic
-  "Metamorphous",                     // Medieval / Renaissance
-  "Rozha+One",                        // High-contrast display serif
-  "Oswald:wght@400;700",              // Bold condensed sans
-  "Russo+One",                        // Geometric bold
-  "Raleway:wght@400;700",             // Elegant geometric sans
-  "Bangers",                          // Comic book impact
-  "Poiret+One",                       // Art Deco
-  "Anton",                            // Ultra condensed bold
-  "Orbitron:wght@400;700",            // Futuristic geometric circles
-  "Press+Start+2P",                   // Pixel / retro game
-  "Permanent+Marker",                 // Bold casual handwritten marker
-  "Black+Ops+One",                    // Military stencil
-  "Alfa+Slab+One",                    // Bold slab serif
-  "Italiana",                         // Italian editorial thin elegant
-  "Fugaz+One",                        // Bold italic display
-  "Luckiest+Guy",                     // Vintage cartoon bold (children's book classic)
-  "Nunito:wght@700;900",              // Rounded geometric sans
-  "Poppins:wght@400;700",             // #1 most downloaded Google Font
-  "Passion+One",                      // Rounded bold condensed
-  "Rammetto+One",                     // Bubble-style bold display
-  "Amatic+SC:wght@400;700",           // Tall handwritten caps (all letters consistent)
-  "Caveat:wght@400;700",              // Casual friendly handwritten
-  "Gloria+Hallelujah",                // Thick expressive marker
-  "Josefin+Sans:wght@400;700",        // Geometric elegant
-  "Comfortaa:wght@400;700",           // Geometric rounded
+  // ── 🚀 Space & Tech ───────────────────────────────────────────────────────────
+  "Orbitron:wght@400;700",                            // Quintessential space font
+  "Rajdhani:wght@400;600;700",                        // Condensed tech all-caps
+
+  // ── 🧒 Cute & Rounded ─────────────────────────────────────────────────────────
+  "Quicksand:wght@400;600;700",                       // Soft rounded sans
+  "Fredoka+One",                                      // Rounded friendly kids
+  "Chewy",                                            // Playful bounce
+  "Boogaloo",                                         // Fun casual
+  "Varela+Round",                                     // Modern clean rounded sans
+  "Bubblegum+Sans",                                   // Cute bold display
+
+
+  // ── 🔤 Unique & Artistic ──────────────────────────────────────────────────────
+  "UnifrakturMaguntia",                               // Blackletter / Gothic
+  "Permanent+Marker",                                 // Bold casual marker
+  "Cabin+Sketch",                                     // Sketch outline hand-drawn
+  "Inknut+Antiqua:wght@400;700",                      // Historical carved ornate serif
+
+  // ── ✍️ Script & Calligraphy ────────────────────────────────────────────────────
+  "Kaushan+Script",                                   // Bold upright script display
+  "Tangerine:wght@400;700",                           // Hairline elegant calligraphy
+  "Satisfy",                                          // Smooth signature style
+  "Caveat:wght@400;700",                              // Non-connecting modern handwriting
+
+
+  // ── 📖 Extra Serif ────────────────────────────────────────────────────────────
+  "Spectral:ital,wght@0,400;0,700;1,400",            // Premium editorial serif
+
+  // ── 🌿 Ornate All-Case — 大小写都有装饰感 ────────────────────────────────────
+  "IM+Fell+English:ital,wght@0,400;1,400",           // Historical quill-pen (both cases)
+  "Almendra:ital,wght@0,400;0,700;1,400",            // kept for CSS only
+  "Philosopher:ital,wght@0,400;0,700;1,400;1,700",   // kept for CSS only
+  "Crimson+Text:ital,wght@0,400;0,600;1,400",        // kept for CSS only
+
 ];
 
 // Browser UA needed to receive woff2 responses from Google Fonts

@@ -10,5 +10,6 @@ export default defineConfig({
   },
   build: {
     outDir: 'dist',
+    assetsInlineLimit: 500000, // inline fonts as base64 up to 500KB — avoids Electron ASAR file-URL issues
   },
 })

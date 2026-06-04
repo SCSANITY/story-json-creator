@@ -233,6 +233,22 @@ const BOX_STYLE_PRESETS = {
   },
 };
 
+// Style fields captured/applied by the preset system.
+// Excludes layout (x, y, boxWidth, boxHeight, maxWidth), content, role, and id.
+const STYLE_PRESET_KEYS = [
+  "font", "size", "bold", "italic", "underline", "textTransform",
+  "letterSpacing", "lineHeight", "opacity",
+  "color", "customColor", "customGradientStart", "customGradientEnd", "customGradientAngle",
+  "textureImage",
+  "shadow", "shadowColor", "shadowOpacity", "shadowBlur", "shadowOffsetX", "shadowOffsetY",
+  "stroke", "strokeWidth", "strokeColor", "strokeOpacity",
+  "bevel", "bevelDepth", "bevelHighlight", "bevelShadow", "bevelTexture",
+  "glow", "glowColor", "glowBlur", "glowOpacity",
+  "boxStyle", "boxFillColor", "boxFillOpacity",
+  "boxBorderColor", "boxBorderOpacity", "boxBorderWidth",
+  "boxRadius", "boxPaddingX", "boxPaddingY", "boxFadeEdges",
+];
+
 const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
 
 const hexToRgba = (hex, alpha) => {
@@ -688,6 +704,12 @@ export default function TemplateEditor() {
   const [sessionLoaded, setSessionLoaded] = useState(false);
   // Local textarea state — avoids setPages on every keystroke (committed on blur / 200ms debounce)
   const [localContent, setLocalContent] = useState("");
+  // Style presets — persisted independently in localStorage
+  const [presets, setPresets] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("ymi-style-presets") ?? "[]"); } catch { return []; }
+  });
+  // Inline save-preset form state: null = hidden, string = name being typed
+  const [presetDraft, setPresetDraft] = useState(null);
 
   // ── Session persistence ───────────────────────────────────────────────────────
   // Load saved session on first mount
@@ -772,6 +794,11 @@ export default function TemplateEditor() {
     }, 2000);
     return () => clearTimeout(saveTimerRef.current);
   }, [pages, storyId, sessionLoaded]);
+
+  // Persist style presets whenever they change
+  useEffect(() => {
+    try { localStorage.setItem("ymi-style-presets", JSON.stringify(presets)); } catch {}
+  }, [presets]);
 
   // ── History ────────────────────────────────────────────────────────────────
   // Only snapshot texts[] per page — never the base64 image data.
@@ -936,6 +963,26 @@ export default function TemplateEditor() {
     setCurrentPage((prev) => Math.max(0, i <= prev ? prev - 1 : prev));
     setSelectedText(null);
   };
+
+  // ── Style presets ──────────────────────────────────────────────────────────
+  const confirmSavePreset = useCallback(() => {
+    if (!sel || presetDraft === null) return;
+    const name = presetDraft.trim() || `Style ${presets.length + 1}`;
+    const styles = {};
+    STYLE_PRESET_KEYS.forEach((k) => { if (sel[k] !== undefined) styles[k] = sel[k]; });
+    setPresets((prev) => [...prev, { id: Date.now().toString(36) + Math.random().toString(36).slice(2, 5), name, styles }]);
+    setPresetDraft(null);
+  }, [sel, presetDraft, presets.length]);
+
+  const applyPreset = useCallback((preset) => {
+    if (!sel) return;
+    saveHistory("Apply style preset");
+    updateText(sel.id, preset.styles);
+  }, [sel, saveHistory, updateText]);
+
+  const deletePreset = useCallback((id) => {
+    setPresets((prev) => prev.filter((p) => p.id !== id));
+  }, []);
 
   const addRecentColor = useCallback((hex) => {
     if (!hex || !hex.startsWith("#")) return;
@@ -1917,6 +1964,61 @@ export default function TemplateEditor() {
         <div style={{ width: 320, borderLeft: "1px solid #222", padding: 16, overflowY: "auto", flexShrink: 0 }}>
           {sel ? (
             <>
+              {/* ── Style Presets ─────────────────────────────────────────── */}
+              <div style={{ marginBottom: 14, paddingBottom: 14, borderBottom: "1px solid #222" }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+                  <span style={{ fontSize: 11, fontWeight: 600, color: "#666", textTransform: "uppercase", letterSpacing: "0.08em" }}>Style Presets</span>
+                  {presetDraft === null ? (
+                    <button
+                      onClick={() => setPresetDraft(`Style ${presets.length + 1}`)}
+                      title="Save current text style as a reusable preset"
+                      style={{ background: "#1c1c00", border: "1px solid #3a3000", borderRadius: 6, padding: "3px 10px", color: "#F5D478", fontSize: 11, cursor: "pointer" }}
+                    >+ Save style</button>
+                  ) : (
+                    <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+                      <input
+                        autoFocus
+                        value={presetDraft}
+                        onChange={(e) => setPresetDraft(e.target.value)}
+                        onKeyDown={(e) => { if (e.key === "Enter") confirmSavePreset(); if (e.key === "Escape") setPresetDraft(null); }}
+                        placeholder="Preset name…"
+                        style={{ background: "#1A1A1A", border: "1px solid #F5D478", borderRadius: 5, padding: "3px 7px", color: "#E0E0E0", fontSize: 11, width: 110, outline: "none" }}
+                      />
+                      <button onClick={confirmSavePreset} style={{ background: "#F5D478", border: "none", borderRadius: 5, padding: "3px 8px", color: "#111", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>✓</button>
+                      <button onClick={() => setPresetDraft(null)} style={{ background: "#2a2a2a", border: "none", borderRadius: 5, padding: "3px 6px", color: "#888", fontSize: 11, cursor: "pointer" }}>✕</button>
+                    </div>
+                  )}
+                </div>
+
+                {presets.length === 0 ? (
+                  <div style={{ fontSize: 11, color: "#3a3a3a", textAlign: "center", padding: "6px 0" }}>No presets saved yet</div>
+                ) : (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                    {presets.map((preset) => (
+                      <div
+                        key={preset.id}
+                        style={{ display: "flex", alignItems: "center", background: "#161616", borderRadius: 6, border: "1px solid #252525", overflow: "hidden" }}
+                      >
+                        <button
+                          onClick={() => applyPreset(preset)}
+                          title={`Apply "${preset.name}" to this text box`}
+                          style={{ flex: 1, background: "none", border: "none", color: "#C0C0C0", fontSize: 12, cursor: "pointer", textAlign: "left", padding: "6px 10px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                        >
+                          {preset.name}
+                        </button>
+                        <button
+                          onClick={() => deletePreset(preset.id)}
+                          title="Delete preset"
+                          style={{ background: "none", border: "none", borderLeft: "1px solid #252525", color: "#444", fontSize: 13, cursor: "pointer", padding: "6px 8px", lineHeight: 1, flexShrink: 0 }}
+                          onMouseEnter={(e) => (e.currentTarget.style.color = "#f87171")}
+                          onMouseLeave={(e) => (e.currentTarget.style.color = "#444")}
+                        >✕</button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
               <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 12, color: "#F5D478" }}>Text properties</div>
 
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 10 }}>

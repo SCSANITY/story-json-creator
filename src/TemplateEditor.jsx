@@ -1,5 +1,4 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from "react";
-import JSZip from "jszip";
 
 const CANVAS_WIDTH = 720;
 const MIN_BOX_WIDTH = 220;
@@ -1394,6 +1393,7 @@ export default function TemplateEditor() {
     setBatchExporting(true);
     setBatchProgress({ done: 0, total: withImages.length });
 
+    const { default: JSZip } = await import("jszip");
     const zip = new JSZip();
 
     for (const { p, i } of withImages) {

@@ -1015,15 +1015,23 @@ const fxMargin = (it) => {
 // it down for display, so the on-screen pixels ARE the export pixels, just smaller.
 async function loadSubtitleFonts(items, failedFonts) {
   const specs = new Map();
-  const add = (style) => {
+  const add = (item, override = {}) => {
+    const style = {
+      font: override.font ?? item.font,
+      fontWeight: override.fontWeight ?? item.fontWeight,
+      bold: override.bold ?? item.bold,
+      italic: override.italic ?? item.italic,
+      size: override.size ?? item.size,
+    };
+    if (typeof style.font !== "string" || !style.font.trim()) return;
     const spec = `${style.italic ? "italic " : ""}${resolveWeight(style)} ${style.size}px ${style.font}`;
     specs.set(spec, style.font.split(",")[0].trim().replace(/^['"]|['"]$/g, ""));
   };
   for (const item of items) {
     add(item);
-    if (item.nameStyle?.enabled) add({ ...item, ...item.nameStyle });
+    if (item.nameStyle?.enabled) add(item, item.nameStyle);
     for (const span of item.spans ?? []) {
-      if (span?.style) add({ ...item, ...span.style });
+      if (span?.style) add(item, span.style);
     }
   }
   await Promise.all([...specs].map(async ([spec, family]) => {

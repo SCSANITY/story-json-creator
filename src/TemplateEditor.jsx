@@ -1013,6 +1013,34 @@ const fxMargin = (it) => {
 // Live preview of one text box, painted with the SAME canvas routine as PNG export
 // (drawTextItem) → true WYSIWYG. The backing canvas is full page-resolution; CSS scales
 // it down for display, so the on-screen pixels ARE the export pixels, just smaller.
+async function loadSubtitleFonts(items, failedFonts) {
+  const specs = new Map();
+  const add = (style) => {
+    const spec = `${style.italic ? "italic " : ""}${resolveWeight(style)} ${style.size}px ${style.font}`;
+    specs.set(spec, style.font.split(",")[0].trim().replace(/^['"]|['"]$/g, ""));
+  };
+  for (const item of items) {
+    add(item);
+    if (item.nameStyle?.enabled) add({ ...item, ...item.nameStyle });
+    for (const span of item.spans ?? []) {
+      if (span?.style) add({ ...item, ...span.style });
+    }
+  }
+  await Promise.all([...specs].map(async ([spec, family]) => {
+    try {
+      await document.fonts.load(spec);
+    } catch {
+      failedFonts?.add(family);
+    }
+  }));
+}
+
+function warnAboutFonts(failedFonts) {
+  if (failedFonts.size) {
+    window.alert(`Font loading failed: ${[...failedFonts].join(", ")}. The exported images may use a substitute font. Check the lettering before using them.`);
+  }
+}
+
 function TextBoxCanvas({ item, previewName, scale, draw }) {
   const ref = useRef(null);
   const bw = item.boxWidth ?? item.maxWidth ?? MIN_BOX_WIDTH;
@@ -1028,17 +1056,7 @@ function TextBoxCanvas({ item, previewName, scale, draw }) {
     const ctx = c.getContext("2d");
     (async () => {
       // Ensure the chosen fonts are loaded, else measureText/fillText silently fall back.
-      const specs = [`${resolveWeight(item)} ${item.size}px ${item.font}`];
-      if (item.nameStyle?.enabled) {
-        const ns = { ...item, ...item.nameStyle };
-        specs.push(`${resolveWeight(ns)} ${item.nameStyle.size ?? item.size}px ${item.nameStyle.font ?? item.font}`);
-      }
-      for (const sp of (item.spans ?? [])) {
-        if (!sp?.style) continue;
-        const e = { ...item, ...sp.style };
-        specs.push(`${resolveWeight(e)} ${e.size}px ${e.font}`);
-      }
-      try { await Promise.all(specs.map((s) => document.fonts.load(s))); } catch { /* ignore */ }
+      await loadSubtitleFonts([item]);
       if (cancelled) return;
       ctx.clearRect(0, 0, c.width, c.height);
       ctx.save();
@@ -1750,7 +1768,7 @@ export default function TemplateEditor() {
 
   // ── Shared canvas renderer ──────────────────────────────────────────────────
   // Renders one page (image + texts) into a PNG Blob. Pure function — no state.
-  const renderPageToPngBlob = async (pageData, resolvedName) => {
+  const renderPageToPngBlob = async (pageData, resolvedName, failedFonts) => {
     const canvas = document.createElement("canvas");
     canvas.width = pageData.width;
     canvas.height = pageData.height;
@@ -1759,19 +1777,7 @@ export default function TemplateEditor() {
     // Make sure every font used on this page is loaded before we measure/draw —
     // otherwise canvas silently falls back to a default face (the #1 cause of
     // "the exported PNG looks different from the workbench").
-    const fontSpecs = new Set();
-    const addSpec = (weight, size, font) => fontSpecs.add(`${weight} ${size}px ${font}`);
-    for (const it of pageData.texts) {
-      addSpec(resolveWeight(it), it.size, it.font);
-      if (it.nameStyle?.enabled) addSpec(resolveWeight({ ...it, ...it.nameStyle }), it.nameStyle.size ?? it.size, it.nameStyle.font ?? it.font);
-      // Spans may use their own font/weight/size — preload those too, else canvas falls back.
-      for (const sp of (it.spans ?? [])) {
-        if (!sp?.style) continue;
-        const e = { ...it, ...sp.style };
-        addSpec(resolveWeight(e), e.size, e.font);
-      }
-    }
-    try { await Promise.all([...fontSpecs].map((s) => document.fonts.load(s))); await document.fonts.ready; } catch { /* ignore */ }
+    await loadSubtitleFonts(pageData.texts, failedFonts);
 
     // Background image
     const img = new Image();
@@ -2139,7 +2145,8 @@ export default function TemplateEditor() {
   const exportPNG = async () => {
     if (!page || !page.image) { alert("Please upload an image for this page first."); return; }
     try {
-      const blob = await renderPageToPngBlob(page, previewName);
+      const failedFonts = new Set();
+      const blob = await renderPageToPngBlob(page, previewName, failedFonts);
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
@@ -2148,6 +2155,7 @@ export default function TemplateEditor() {
       a.click();
       a.remove();
       setTimeout(() => URL.revokeObjectURL(url), 30_000); // don't abort the download (browser race)
+      warnAboutFonts(failedFonts);
     } catch (err) {
       console.error("PNG export failed:", err);
       alert(`PNG export failed: ${err?.message ?? err}`);
@@ -2165,10 +2173,11 @@ export default function TemplateEditor() {
     let failedPages = 0;
     try {
       const zip = new JSZip();
+      const failedFonts = new Set();
 
       for (const { p, i } of withImages) {
         try {
-          const blob = await renderPageToPngBlob(p, previewName);
+          const blob = await renderPageToPngBlob(p, previewName, failedFonts);
           const stem = p.fileName ? p.fileName.replace(/\.[^.]+$/, "") : `page_${String(i + 1).padStart(2, "0")}`;
           // Zero-pad page number so files sort correctly in the folder
           const filename = `${String(i + 1).padStart(2, "0")}_${stem}_subtitle.png`;
@@ -2195,6 +2204,7 @@ export default function TemplateEditor() {
       // the download in some browsers (Firefox/Safari race).
       setTimeout(() => URL.revokeObjectURL(url), 30_000);
 
+      warnAboutFonts(failedFonts);
       if (failedPages > 0) alert(`ZIP downloaded, but ${failedPages} page(s) failed to render — check those pages.`);
     } catch (err) {
       console.error("Batch export failed:", err);

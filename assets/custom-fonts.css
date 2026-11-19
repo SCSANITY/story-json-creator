@@ -80,3 +80,165 @@
   font-display: swap;
   src: url('./fonts/custom/Zodiak-VariableItalic.ttf') format('truetype');
 }
+
+/* ── New imports 2026-06-09 (variable, full weight range) ── */
+@font-face {
+  font-family: 'Bevellier';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('./fonts/custom/Bevellier-Variable.ttf') format('truetype');
+}
+
+@font-face {
+  font-family: 'Bevellier';
+  font-style: italic;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('./fonts/custom/Bevellier-VariableItalic.ttf') format('truetype');
+}
+
+@font-face {
+  font-family: 'Technor';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('./fonts/custom/Technor-Variable.ttf') format('truetype');
+}
+
+@font-face {
+  font-family: 'Rowan';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('./fonts/custom/Rowan-Variable.ttf') format('truetype');
+}
+
+@font-face {
+  font-family: 'Rowan';
+  font-style: italic;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('./fonts/custom/Rowan-VariableItalic.ttf') format('truetype');
+}
+
+@font-face {
+  font-family: 'Bespoke Stencil';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('./fonts/custom/BespokeStencil-Variable.ttf') format('truetype');
+}
+
+@font-face {
+  font-family: 'Bespoke Stencil';
+  font-style: italic;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('./fonts/custom/BespokeStencil-VariableItalic.ttf') format('truetype');
+}
+
+@font-face {
+  font-family: 'Nippo';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('./fonts/custom/Nippo-Variable.ttf') format('truetype');
+}
+
+@font-face {
+  font-family: 'Telma';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('./fonts/custom/Telma-Variable.ttf') format('truetype');
+}
+
+@font-face {
+  font-family: 'Cabinet Grotesk';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('./fonts/custom/CabinetGrotesk-Variable.ttf') format('truetype');
+}
+
+/* ── New imports 2026-07-15: Coustard, Clarendon, Betm Rounded (static weights) ── */
+@font-face {
+  font-family: 'Coustard';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('./fonts/custom/Coustard-Regular.ttf') format('truetype');
+}
+
+@font-face {
+  font-family: 'Coustard';
+  font-style: normal;
+  font-weight: 900;
+  font-display: swap;
+  src: url('./fonts/custom/Coustard-Black.ttf') format('truetype');
+}
+
+@font-face {
+  font-family: 'Clarendon';
+  font-style: normal;
+  font-weight: 300;
+  font-display: swap;
+  src: url('./fonts/custom/ClarendonLTStd-Light.ttf') format('truetype');
+}
+
+@font-face {
+  font-family: 'Clarendon';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('./fonts/custom/ClarendonLTStd.ttf') format('truetype');
+}
+
+@font-face {
+  font-family: 'Clarendon';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('./fonts/custom/ClarendonLTStd-Bold.ttf') format('truetype');
+}
+
+@font-face {
+  font-family: 'Betm Rounded';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('./fonts/custom/BetmRounded-Regular.ttf') format('truetype');
+}
+
+@font-face {
+  font-family: 'Betm Rounded';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('./fonts/custom/BetmRounded-Bold.ttf') format('truetype');
+}
+
+@font-face {
+  font-family: 'Betm Rounded';
+  font-style: normal;
+  font-weight: 900;
+  font-display: swap;
+  src: url('./fonts/custom/BetmRounded-Black.ttf') format('truetype');
+}
+
+@font-face {
+  font-family: 'Betm Rounded';
+  font-style: italic;
+  font-weight: 300;
+  font-display: swap;
+  src: url('./fonts/custom/BetmRounded-LightItalic.ttf') format('truetype');
+}
+
+@font-face {
+  font-family: 'Betm Rounded';
+  font-style: italic;
+  font-weight: 400;
+  font-display: swap;
+  src: url('./fonts/custom/BetmRounded-Italic.ttf') format('truetype');
+}

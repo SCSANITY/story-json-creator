@@ -1,6 +1,15 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from "react";
+// Static import (NOT lazy): a lazy chunk is fetched only when the user clicks batch-export,
+// and we redeploy often — after any redeploy the old hashed chunk 404s for every already-open
+// session, silently breaking the ZIP download. Bundling it (~30KB gzip) removes that whole
+// failure class.
+import JSZip from "jszip";
 
-const CANVAS_WIDTH = 720;
+// Zoom is the absolute scale (1 = 100% = 1:1 with exported pixels). Multiplicative steps so the
+// range from "fit a 5000px page" (~6%) to inspecting at 200% feels smooth.
+const ZOOM_MIN = 0.04;
+const ZOOM_MAX = 2;
+const ZOOM_STEP = 1.25;
 const MIN_BOX_WIDTH = 220;
 const MIN_BOX_HEIGHT = 90;
 
@@ -90,6 +99,21 @@ const FONT_OPTIONS = [
   { label: "Caveat",             value: "'Caveat', cursive",           group: "script" },
   { label: "Dancing Script",     value: "'DancingScript', cursive",    group: "script" },
   { label: "Kalam",              value: "'Kalam', cursive",            group: "script" },
+  { label: "Coustard",           value: "'Coustard', serif",           group: "script" },
+  { label: "Clarendon",          value: "'Clarendon', serif",          group: "script" },
+  { label: "Betm Rounded",       value: "'Betm Rounded', sans-serif",  group: "script" },
+  { label: "Coustard",           value: "'Coustard', serif",           group: "script" },
+  { label: "Clarendon",          value: "'Clarendon', serif",          group: "script" },
+  { label: "Betm Rounded",       value: "'Betm Rounded', sans-serif",  group: "script" },
+
+  // ── ✒️ Display & Grotesk — 新导入 (variable TTF, assets/fonts/custom) ──────────
+  { label: "Bevellier",          value: "'Bevellier', serif",          group: "imports" },
+  { label: "Rowan",              value: "'Rowan', serif",              group: "imports" },
+  { label: "Technor",            value: "'Technor', sans-serif",       group: "imports" },
+  { label: "Nippo",              value: "'Nippo', sans-serif",         group: "imports" },
+  { label: "Cabinet Grotesk",    value: "'Cabinet Grotesk', sans-serif", group: "imports" },
+  { label: "Telma",              value: "'Telma', sans-serif",         group: "imports" },
+  { label: "Bespoke Stencil",    value: "'Bespoke Stencil', sans-serif", group: "imports" },
 ];
 
 const COLOR_PRESETS = [
@@ -154,7 +178,12 @@ function buildCanvasGradient(ctx, colorVal, bx, by, bh, bw = 0, item = null) {
     const rad = (angle * Math.PI) / 180;
     const dx = Math.sin(rad), dy = -Math.cos(rad);
     const cx = bx + bw / 2, cy = by + bh / 2;
-    const halfLen = Math.sqrt((bw / 2) ** 2 + (bh / 2) ** 2) || bh / 2;
+    // Gradient-line length = the box's extent PROJECTED onto the gradient direction
+    // (CSS linear-gradient rule: |W·sinθ| + |H·cosθ|). Using the diagonal for every
+    // angle made vertical gradients span the full width too — but a one-line subtitle
+    // is only ~bh tall, so the text sampled just the middle sliver of the c1→c2 ramp
+    // and looked flat. Projecting makes vertical span bh, horizontal span bw.
+    const halfLen = (Math.abs(dx) * bw + Math.abs(dy) * bh) / 2 || bh / 2;
     const grad = ctx.createLinearGradient(
       cx - dx * halfLen, cy - dy * halfLen,
       cx + dx * halfLen, cy + dy * halfLen,
@@ -172,6 +201,97 @@ function buildCanvasGradient(ctx, colorVal, bx, by, bh, bw = 0, item = null) {
   grad.addColorStop(1,    stops[3]);
   return grad;
 }
+
+// Build a self-describing `fill` descriptor for JSON export so the worker can reproduce
+// gradients/textures exactly (the flattened `color` hex alone would lose the gradient).
+// Mirrors buildCanvasGradient: preset gradients → 4-stop vertical (angle 180); custom →
+// 2-stop at the given angle; texture → image reference; everything else → solid.
+const buildFill = (color, customColor, gStart, gEnd, gAngle, textureImage) => {
+  if (textureImage) return { type: "texture", image: textureImage };
+  if (color === "custom_gradient") {
+    return { type: "linearGradient", angle: gAngle ?? 180, stops: [
+      { offset: 0, color: gStart ?? "#FF8C00" },
+      { offset: 1, color: gEnd ?? "#FFD700" },
+    ] };
+  }
+  const stops = GRADIENT_STOPS[color];
+  if (stops) {
+    return { type: "linearGradient", angle: 180, stops: [
+      { offset: 0,    color: stops[0] },
+      { offset: 0.28, color: stops[1] },
+      { offset: 0.52, color: stops[2] },
+      { offset: 1,    color: stops[3] },
+    ] };
+  }
+  return { type: "solid", color: color === "custom" ? (customColor ?? "#FFFFFF") : (color ?? "#FFFFFF") };
+};
+
+// Reverse map: "stop0,stop1,stop2,stop3" (uppercase) → preset gradient key. Lets import
+// recognise a preset gradient from its exported `fill.stops` and restore the named swatch.
+const GRADIENT_KEY_BY_STOPS = (() => {
+  const m = {};
+  for (const [key, stops] of Object.entries(GRADIENT_STOPS)) {
+    m[stops.map((s) => s.toUpperCase()).join(",")] = key;
+  }
+  return m;
+})();
+
+// Inverse of buildFill + resolveExportColor: rebuild the editor's color fields from a `fill`
+// descriptor on import. Without this, the round-trip degrades every gradient/texture to the
+// flat representative `color` hex (the bug: imported gradients showed as a single solid colour).
+const recoverColorDescriptor = (t) => {
+  const base = {
+    color: t.color ?? "#FFFFFF",
+    customColor: t.customColor ?? "#FFFFFF",
+    customGradientStart: t.customGradientStart ?? "#FF8C00",
+    customGradientEnd: t.customGradientEnd ?? "#FFD700",
+    customGradientAngle: t.customGradientAngle ?? 180,
+    textureImage: t.textureImage ?? null,
+  };
+  const isKnownSwatch = (hex) =>
+    typeof hex === "string" && COLOR_PRESETS.some((c) => c.value.toUpperCase() === hex.toUpperCase());
+  const f = t.fill;
+  if (!f || typeof f !== "object") {
+    // Legacy template with no `fill`: a raw flat hex that isn't White/Black becomes a custom solid.
+    if (typeof base.color === "string" && base.color.startsWith("#") && !isKnownSwatch(base.color)) {
+      base.customColor = base.color; base.color = "custom";
+    }
+    return base;
+  }
+  if (f.type === "texture" && f.image) return { ...base, textureImage: f.image };
+  if (f.type === "linearGradient" && Array.isArray(f.stops) && f.stops.length >= 2) {
+    const stops = f.stops.map((s) => s.color ?? "#000000");
+    const presetKey = stops.length === 4 ? GRADIENT_KEY_BY_STOPS[stops.map((s) => s.toUpperCase()).join(",")] : null;
+    if (presetKey) return { ...base, color: presetKey };
+    return {
+      ...base,
+      color: "custom_gradient",
+      customGradientStart: stops[0],
+      customGradientEnd: stops[stops.length - 1],
+      customGradientAngle: f.angle ?? 180,
+    };
+  }
+  if (f.type === "solid" && f.color) {
+    return isKnownSwatch(f.color)
+      ? { ...base, color: f.color }
+      : { ...base, color: "custom", customColor: f.color };
+  }
+  return base;
+};
+
+// Inverse of exportSpanStyle: rebuild a span's editor style delta on import. Recovers the fill
+// fields from `fill`/`color` only when the span overrode the fill; passes other keys through.
+const importSpanStyle = (style = {}) => {
+  const { fill, color, ...rest } = style;
+  if (fill === undefined && color === undefined) return { ...rest };
+  const rec = recoverColorDescriptor({ fill, color });
+  return {
+    ...rest,
+    color: rec.color, customColor: rec.customColor,
+    customGradientStart: rec.customGradientStart, customGradientEnd: rec.customGradientEnd,
+    customGradientAngle: rec.customGradientAngle, textureImage: rec.textureImage,
+  };
+};
 
 const BOX_STYLE_PRESETS = {
   rounded_translucent: {
@@ -225,17 +345,18 @@ const BOX_STYLE_PRESETS = {
     borderColor: "#FFFFFF",
     borderOpacity: 0,
     borderWidth: 0,
-    radius: 60,
-    paddingX: 36,
-    paddingY: 20,
+    radius: 48,
+    paddingX: 40,
+    paddingY: 28,
     fadeEdges: true,
+    feather: 32,
   },
 };
 
 // Style fields captured/applied by the preset system.
 // Excludes layout (x, y, boxWidth, boxHeight, maxWidth), content, role, and id.
 const STYLE_PRESET_KEYS = [
-  "font", "size", "bold", "italic", "underline", "textTransform",
+  "font", "size", "bold", "fontWeight", "italic", "underline", "textTransform",
   "letterSpacing", "lineHeight", "opacity",
   "color", "customColor", "customGradientStart", "customGradientEnd", "customGradientAngle",
   "textureImage",
@@ -245,10 +366,81 @@ const STYLE_PRESET_KEYS = [
   "glow", "glowColor", "glowBlur", "glowOpacity",
   "boxStyle", "boxFillColor", "boxFillOpacity",
   "boxBorderColor", "boxBorderOpacity", "boxBorderWidth",
-  "boxRadius", "boxPaddingX", "boxPaddingY", "boxFadeEdges",
+  "boxRadius", "boxPaddingTop", "boxPaddingRight", "boxPaddingBottom", "boxPaddingLeft", "boxFadeEdges", "boxFeather",
 ];
 
+// Per-side inner padding (distance between text and box edge). Falls back to the legacy
+// symmetric boxPaddingX/boxPaddingY for templates/presets authored before per-side padding.
+const resolvePad = (item) => ({
+  top:    item.boxPaddingTop    ?? item.boxPaddingY ?? 0,
+  right:  item.boxPaddingRight  ?? item.boxPaddingX ?? 0,
+  bottom: item.boxPaddingBottom ?? item.boxPaddingY ?? 0,
+  left:   item.boxPaddingLeft   ?? item.boxPaddingX ?? 0,
+});
+
+// Convert a style object that may carry legacy symmetric padding into the canonical
+// per-side form (and drop the legacy keys), so applying old presets overrides cleanly.
+const normalizePaddingStyles = (styles) => {
+  if (styles.boxPaddingX === undefined && styles.boxPaddingY === undefined) return styles;
+  const { boxPaddingX, boxPaddingY, ...rest } = styles;
+  return {
+    ...rest,
+    boxPaddingTop:    rest.boxPaddingTop    ?? boxPaddingY ?? 0,
+    boxPaddingRight:  rest.boxPaddingRight  ?? boxPaddingX ?? 0,
+    boxPaddingBottom: rest.boxPaddingBottom ?? boxPaddingY ?? 0,
+    boxPaddingLeft:   rest.boxPaddingLeft   ?? boxPaddingX ?? 0,
+  };
+};
+
 const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
+
+// ── Coordinate-space law: the image's NATIVE pixels ARE the page space. ──────────────
+// Whenever a page's dimensions change (an image with different dims is assigned, or a JSON
+// authored in another space is imported onto an existing image), remap the whole text layout
+// into the new space instead of silently distorting the image or misplacing the text:
+//   · positions/extents map per-axis (x/boxWidth/maxWidth by W-ratio; y/boxHeight by H-ratio)
+//   · size-like values (font size, letterSpacing, stroke/shadow/glow/bevel, radius, feather)
+//     scale by the WIDTH ratio — font metrics scale linearly with size, so wrapping inside the
+//     (also W-scaled) box stays EXACTLY the same. For same-aspect rescales (1024→4096) every
+//     factor coincides and the remap is lossless.
+const rescalePageLayout = (page, newW, newH) => {
+  const oldW = page.width, oldH = page.height;
+  if (!oldW || !oldH || (oldW === newW && oldH === newH)) return { ...page, width: newW, height: newH };
+  const sx = newW / oldW, sy = newH / oldH, s = sx;
+  const num = (v, f) => (v == null ? v : +(v * f).toFixed(2));
+  const px  = (v, f) => (v == null ? v : Math.round(v * f));
+  const rescaleStyle = (o) => {
+    if (!o) return o;
+    const r = { ...o };
+    if (r.size != null) r.size = Math.max(1, Math.round(r.size * s));
+    r.letterSpacing = num(r.letterSpacing, s);
+    r.strokeWidth   = num(r.strokeWidth, s);
+    r.shadowBlur    = num(r.shadowBlur, s);
+    r.shadowOffsetX = num(r.shadowOffsetX, s);
+    r.shadowOffsetY = num(r.shadowOffsetY, s);
+    r.glowBlur      = num(r.glowBlur, s);
+    if (r.bevelDepth != null) r.bevelDepth = Math.max(1, Math.round(r.bevelDepth * s));
+    return r;
+  };
+  const texts = (page.texts ?? []).map((t) => {
+    const nt = rescaleStyle(t);
+    nt.x = px(t.x, sx); nt.y = px(t.y, sy);
+    nt.boxWidth  = px(t.boxWidth, sx);
+    nt.maxWidth  = px(t.maxWidth, sx);
+    nt.boxHeight = px(t.boxHeight, sy);
+    nt.boxRadius = px(t.boxRadius, s);
+    nt.boxFeather = px(t.boxFeather, s);
+    nt.boxPaddingLeft   = px(t.boxPaddingLeft, sx);
+    nt.boxPaddingRight  = px(t.boxPaddingRight, sx);
+    nt.boxPaddingTop    = px(t.boxPaddingTop, sy);
+    nt.boxPaddingBottom = px(t.boxPaddingBottom, sy);
+    nt.boxBorderWidth   = num(t.boxBorderWidth, s);
+    if (t.nameStyle) nt.nameStyle = rescaleStyle(t.nameStyle);
+    if (Array.isArray(t.spans)) nt.spans = t.spans.map((sp) => (sp?.style ? { ...sp, style: rescaleStyle(sp.style) } : sp));
+    return nt;
+  });
+  return { ...page, width: newW, height: newH, texts };
+};
 
 const hexToRgba = (hex, alpha) => {
   const normalized = hex.replace("#", "");
@@ -325,6 +517,7 @@ const defaultTextItem = (pageWidth, pageHeight) => {
     bold: true,
     italic: false,
     textAlign: "left",
+    verticalAlign: "top",
     shadow: true,
     shadowColor: "#000000",
     shadowOpacity: 0.52,
@@ -345,9 +538,12 @@ const defaultTextItem = (pageWidth, pageHeight) => {
     boxBorderOpacity: preset.borderOpacity,
     boxBorderWidth: preset.borderWidth,
     boxRadius:    preset.radius,
-    boxPaddingX:  preset.paddingX,
-    boxPaddingY:  preset.paddingY,
+    boxPaddingTop:    preset.paddingY,
+    boxPaddingRight:  preset.paddingX,
+    boxPaddingBottom: preset.paddingY,
+    boxPaddingLeft:   preset.paddingX,
     boxFadeEdges: preset.fadeEdges ?? false,
+    boxFeather: preset.feather ?? 30,
     textureImage: null,
     customGradientStart: "#FF8C00",
     customGradientEnd: "#FFD700",
@@ -367,6 +563,7 @@ const defaultTextItem = (pageWidth, pageHeight) => {
     glowOpacity: 0.85,
     textTransform: "none",
     underline: false,
+    nameStyle: null, // independent styling for the {name} token
   };
 };
 
@@ -458,6 +655,85 @@ const getTextColorStyle = (item) => {
   };
 };
 
+// ── {name} independent styling helpers ─────────────────────────────────────
+// Keys that nameStyle can override on the base text item
+const NAME_STYLE_KEYS = [
+  "font","size","bold","fontWeight","italic","letterSpacing","textTransform","textureImage",
+  "color","customColor","customGradientStart","customGradientEnd","customGradientAngle",
+  "shadow","shadowColor","shadowOpacity","shadowBlur","shadowOffsetX","shadowOffsetY",
+  "stroke","strokeWidth","strokeColor","strokeOpacity",
+  "bevel","bevelDepth","bevelHighlight","bevelShadow",
+  "glow","glowColor","glowBlur","glowOpacity",
+];
+
+// Returns a full effective-style item for the {name} token, or null if not enabled
+const resolveNameStyle = (item) => {
+  if (!item.nameStyle?.enabled) return null;
+  const ns = item.nameStyle;
+  const result = { ...item };
+  NAME_STYLE_KEYS.forEach((k) => { if (ns[k] !== undefined && ns[k] !== null) result[k] = ns[k]; });
+  return result;
+};
+
+// Keep span char-offsets valid after the content string is edited. Diffs old→new by common
+// prefix/suffix; positions before the change stay, after it shift by the length delta, and
+// positions inside the replaced region collapse to the change start. Empty spans are dropped.
+const remapSpans = (spans, oldText, newText) => {
+  if (!spans?.length) return spans ?? [];
+  if (oldText === newText) return spans;
+  const minLen = Math.min(oldText.length, newText.length);
+  let p = 0; while (p < minLen && oldText[p] === newText[p]) p++;
+  let s = 0; while (s < (minLen - p) && oldText[oldText.length - 1 - s] === newText[newText.length - 1 - s]) s++;
+  const oldChangeEnd = oldText.length - s;
+  const delta = newText.length - oldText.length;
+  const mapPos = (pos) => (pos <= p ? pos : pos >= oldChangeEnd ? pos + delta : p);
+  const out = [];
+  for (const sp of spans) {
+    const ns = mapPos(sp.start), ne = mapPos(sp.end);
+    if (ne > ns) out.push({ ...sp, start: ns, end: ne });
+  }
+  return out;
+};
+
+// Named font weights for variable fonts (the dropdown). Canvas/CSS take the numeric value.
+const WEIGHT_OPTIONS = [
+  { label: "Thin", value: 100 },
+  { label: "ExtraLight", value: 200 },
+  { label: "Light", value: 300 },
+  { label: "Regular", value: 400 },
+  { label: "Medium", value: 500 },
+  { label: "SemiBold", value: 600 },
+  { label: "Bold", value: 700 },
+  { label: "ExtraBold", value: 800 },
+  { label: "Black", value: 900 },
+];
+// Resolved numeric font weight. `fontWeight` is the source of truth; legacy items only have
+// `bold` (→ 700/400). A variable font whose axis is narrower than the value is clamped by the browser.
+const resolveWeight = (eff) => eff.fontWeight ?? (eff.bold ? 700 : 400);
+
+// Apply a text-transform to a string (shared by single-style + per-run rendering).
+// NOTE: `capitalize` is TRUE Title Case — lowercase everything first, then uppercase the first
+// letter of each word. The word boundary EXCLUDES apostrophes (' and ’) so a possessive like
+// "{name}'s" → "Alexander's" (NOT "Alexander'S"). "ADVENTURE story" → "Adventure Story".
+// This must stay byte-identical to the worker's capitalizeText() (worker spec §appendix).
+const applyTransform = (s, tt) =>
+  tt === "uppercase" ? s.toUpperCase()
+  : tt === "lowercase" ? s.toLowerCase()
+  : tt === "capitalize" ? s.toLowerCase().replace(/(^|[^\p{L}\p{N}'’])([\p{L}\p{N}])/gu, (_m, p, c) => p + c.toUpperCase())
+  : s;
+
+// Split content into [{text, isName}] segments after replacing {name} with resolvedName
+const splitContentSegments = (content, resolvedName) => {
+  const parts = content.split("{name}");
+  if (parts.length === 1) return [{ text: content, isName: false }];
+  const segs = [];
+  parts.forEach((part, i) => {
+    if (part) segs.push({ text: part, isName: false });
+    if (i < parts.length - 1) segs.push({ text: resolvedName, isName: true });
+  });
+  return segs;
+};
+
 const getRenderedTextStyle = (item) => {
   return {
     fontFamily: item.font,
@@ -539,6 +815,41 @@ function NumericField({
   );
 }
 
+// ── Shared property-panel control primitives ────────────────────────────────────
+// One layout system for the whole panel so controls never overlap and spacing stays
+// consistent: number/color controls live in grid cells (Field), sliders ALWAYS get
+// their own full-width row (SliderRow) — never crammed next to another control.
+const PANEL_LABEL = { fontSize: 10, color: "#888", display: "block", marginBottom: 4, whiteSpace: "nowrap" };
+
+function Field({ label, children, style }) {
+  return (
+    <div style={{ minWidth: 0, ...style }}>
+      <label style={PANEL_LABEL}>{label}</label>
+      {children}
+    </div>
+  );
+}
+
+function SliderRow({ label, value, min = 0, max = 1, step = 0.05, onChange, format, accent = "#F5D478", style }) {
+  return (
+    <div style={{ marginBottom: 10, ...style }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 5 }}>
+        <span style={{ fontSize: 10, color: "#888" }}>{label}</span>
+        <span style={{ fontSize: 10, color: "#9a9a9a", fontVariantNumeric: "tabular-nums" }}>{format ? format(value) : value}</span>
+      </div>
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={onChange}
+        style={{ width: "100%", height: 16, margin: 0, display: "block", accentColor: accent, cursor: "pointer" }}
+      />
+    </div>
+  );
+}
+
 // ── FontPicker ─────────────────────────────────────────────────────────────────
 // Custom font selector that renders each option in its own typeface.
 // Native <select> <option> elements CANNOT render custom fonts (OS limitation).
@@ -551,6 +862,7 @@ const FONT_GROUPS = [
   { key: "cute",    label: "🧒 Cute & Rounded (圆润可爱)" },
   { key: "display", label: "🔤 Unique & Artistic (特效艺术字)" },
   { key: "script",  label: "✍️  Script & Calligraphy (书法手写)" },
+  { key: "imports", label: "✒️ Display & Grotesk (展示/无衬线)" },
 ];
 
 function FontPicker({ value, onChange }) {
@@ -681,6 +993,79 @@ function FontPicker({ value, onChange }) {
   );
 }
 
+// Effect-overflow margin (page px) so glow/shadow/stroke/bevel are not clipped by the
+// per-box preview canvas. Mirrors the effect extents drawTextItem can paint outside the box.
+const fxMargin = (it) => {
+  let m = 4;
+  const acc = (o) => {
+    if (!o) return;
+    if (o.glow)   m = Math.max(m, (o.glowBlur ?? 20) * 1.8);
+    if (o.shadow) m = Math.max(m, (o.shadowBlur ?? 8) + Math.max(Math.abs(o.shadowOffsetX ?? 2), Math.abs(o.shadowOffsetY ?? 4)));
+    if (o.stroke) m = Math.max(m, (o.strokeWidth ?? 4));
+    if (o.bevel)  m = Math.max(m, (o.bevelDepth ?? 4) * 2);
+    if (o.boxFadeEdges) m = Math.max(m, (o.boxFeather ?? 30) * 2.2); // Cloud/Mist blur spreads outward
+  };
+  acc(it);
+  if (it.nameStyle?.enabled) acc(it.nameStyle);
+  return Math.ceil(m + 6);
+};
+
+// Live preview of one text box, painted with the SAME canvas routine as PNG export
+// (drawTextItem) → true WYSIWYG. The backing canvas is full page-resolution; CSS scales
+// it down for display, so the on-screen pixels ARE the export pixels, just smaller.
+function TextBoxCanvas({ item, previewName, scale, draw }) {
+  const ref = useRef(null);
+  const bw = item.boxWidth ?? item.maxWidth ?? MIN_BOX_WIDTH;
+  const bh = item.boxHeight ?? MIN_BOX_HEIGHT;
+  const M = fxMargin(item);
+  const cw = Math.round(bw + M * 2);
+  const ch = Math.round(bh + M * 2);
+
+  useEffect(() => {
+    let cancelled = false;
+    const c = ref.current;
+    if (!c) return;
+    const ctx = c.getContext("2d");
+    (async () => {
+      // Ensure the chosen fonts are loaded, else measureText/fillText silently fall back.
+      const specs = [`${resolveWeight(item)} ${item.size}px ${item.font}`];
+      if (item.nameStyle?.enabled) {
+        const ns = { ...item, ...item.nameStyle };
+        specs.push(`${resolveWeight(ns)} ${item.nameStyle.size ?? item.size}px ${item.nameStyle.font ?? item.font}`);
+      }
+      for (const sp of (item.spans ?? [])) {
+        if (!sp?.style) continue;
+        const e = { ...item, ...sp.style };
+        specs.push(`${resolveWeight(e)} ${e.size}px ${e.font}`);
+      }
+      try { await Promise.all(specs.map((s) => document.fonts.load(s))); } catch { /* ignore */ }
+      if (cancelled) return;
+      ctx.clearRect(0, 0, c.width, c.height);
+      ctx.save();
+      ctx.translate(M - item.x, M - item.y); // map the item's absolute page coords into the box canvas
+      try { await draw(ctx, item, previewName); } catch { /* ignore */ }
+      ctx.restore();
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [item, previewName, M, cw, ch]);
+
+  return (
+    <canvas
+      ref={ref}
+      width={cw}
+      height={ch}
+      style={{
+        position: "absolute",
+        left: -M * scale,
+        top: -M * scale,
+        width: cw * scale,
+        height: ch * scale,
+        pointerEvents: "none",
+      }}
+    />
+  );
+}
 
 export default function TemplateEditor() {
   const [storyId, setStoryId] = useState("story_01");
@@ -689,7 +1074,7 @@ export default function TemplateEditor() {
   const [selectedText, setSelectedText] = useState(null);
   const [interaction, setInteraction] = useState(null);
   const [previewName, setPreviewName] = useState("Amy");
-  const [viewportZoom, setViewportZoom] = useState(1);
+  const [viewportZoom, setViewportZoom] = useState(0.25); // corrected to "fit" once a page loads
   const canvasRef = useRef(null);
   const [showExport, setShowExport] = useState(false);
   const [exportJSON, setExportJSON] = useState("");
@@ -698,9 +1083,22 @@ export default function TemplateEditor() {
   const [batchProgress, setBatchProgress] = useState({ done: 0, total: 0 });
   const [imageLoadProgress, setImageLoadProgress] = useState({ active: false, done: 0, total: 0 });
   const [snapGuides, setSnapGuides] = useState([]);
-  const [recentColors, setRecentColors] = useState([]);
+  const [recentColors, setRecentColors] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("ymi-recent-colors") ?? "[]"); } catch { return []; }
+  });
+  // Recently-used custom gradients ({start,end,angle}) — persisted, re-applied with one click.
+  const [recentGradients, setRecentGradients] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("ymi-recent-gradients") ?? "[]"); } catch { return []; }
+  });
   const [hoveredPage, setHoveredPage] = useState(null);
   const [sessionLoaded, setSessionLoaded] = useState(false);
+  // Per-character styling scope. null = editing the whole text box; {start,end} = editing a
+  // span (a selected character range) so the style controls write into that span's delta.
+  const [spanRange, setSpanRange] = useState(null);
+  // Latest text selection inside the Content textarea ({start,end}) — drives "style selection".
+  const contentSelRef = useRef({ start: 0, end: 0 });
+  const contentTaRef = useRef(null); // the Content <textarea> DOM node — read live selection on click
+  const [contentSel, setContentSel] = useState({ start: 0, end: 0 });
   // Local textarea state — avoids setPages on every keystroke (committed on blur / 200ms debounce)
   const [localContent, setLocalContent] = useState("");
   // Style presets — persisted independently in localStorage
@@ -709,6 +1107,12 @@ export default function TemplateEditor() {
   });
   // Inline save-preset form state: null = hidden, string = name being typed
   const [presetDraft, setPresetDraft] = useState(null);
+  // Same, for saving the {name} token's style as a preset (form lives in the {name} panel)
+  const [namePresetDraft, setNamePresetDraft] = useState(null);
+  // Undo affordance after applying a preset: null = hidden,
+  // { textId, beforePatch, name, scope } = a revertable apply. Auto-dismisses after 6s.
+  const [presetUndo, setPresetUndo] = useState(null);
+  const presetUndoTimerRef = useRef(null);
 
   // ── Session persistence ───────────────────────────────────────────────────────
   // Load saved session on first mount
@@ -799,6 +1203,14 @@ export default function TemplateEditor() {
     try { localStorage.setItem("ymi-style-presets", JSON.stringify(presets)); } catch {}
   }, [presets]);
 
+  // Persist recently-used solid colours and custom gradients across sessions.
+  useEffect(() => {
+    try { localStorage.setItem("ymi-recent-colors", JSON.stringify(recentColors)); } catch {}
+  }, [recentColors]);
+  useEffect(() => {
+    try { localStorage.setItem("ymi-recent-gradients", JSON.stringify(recentGradients)); } catch {}
+  }, [recentGradients]);
+
   // ── History ────────────────────────────────────────────────────────────────
   // Only snapshot texts[] per page — never the base64 image data.
   // Images can't be undone and each one is 500KB–1MB; storing them in 40
@@ -871,11 +1283,39 @@ export default function TemplateEditor() {
   };
 
   const page = pages[currentPage] ?? null;
-  const baseScale = useMemo(() => {
-    if (!page) return 1;
-    return CANVAS_WIDTH / page.width;
-  }, [page]);
-  const scale = baseScale * viewportZoom;
+  // viewportZoom IS the absolute scale: 100% (=1) renders 1:1 with the exported page pixels.
+  const scale = viewportZoom;
+  // Measure the canvas scroll-area width so "Fit" always fits the ACTUAL available space
+  // (never overflows), regardless of window size.
+  const scrollAreaRef = useRef(null);
+  const [scrollAreaW, setScrollAreaW] = useState(0);
+  useEffect(() => {
+    const el = scrollAreaRef.current;
+    if (!el) return;
+    setScrollAreaW(el.clientWidth);
+    const ro = new ResizeObserver((entries) => { for (const e of entries) setScrollAreaW(e.contentRect.width); });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [page != null]); // eslint-disable-line react-hooks/exhaustive-deps
+  const fitZoom = useMemo(() => {
+    if (!page || scrollAreaW <= 0) return 1;
+    return clamp((scrollAreaW - 24) / page.width, ZOOM_MIN, 1); // capped at 100% so small pages aren't blown up
+  }, [page, scrollAreaW]);
+  // Auto-fit the first page once the scroll area is measured, so a 5000px page doesn't open at 1:1.
+  const didInitZoomRef = useRef(false);
+  useEffect(() => {
+    if (!didInitZoomRef.current && page && scrollAreaW > 0) {
+      didInitZoomRef.current = true;
+      setViewportZoom(clamp((scrollAreaW - 24) / page.width, ZOOM_MIN, 1));
+    }
+  }, [page, scrollAreaW]);
+
+  // Currently-selected text item. Declared here (right after `page`) because it is
+  // referenced inside useCallback dependency arrays further down (e.g. confirmSavePreset,
+  // applyPreset). Dependency arrays are evaluated during render, so `sel` must already be
+  // initialized by then — declaring it lower would put it in the Temporal Dead Zone and
+  // throw "Cannot access 'sel' before initialization", blanking the whole app.
+  const sel = page?.texts.find((t) => t.id === selectedText) ?? null;
 
   const updateText = useCallback((id, updates) => {
     setPages((prev) => {
@@ -887,6 +1327,51 @@ export default function TemplateEditor() {
     });
   }, [currentPage]);
 
+  // ── Per-character span styling: scope routing ──────────────────────────────
+  // The span (in sel.spans) whose range matches the active spanRange, or null in box scope.
+  const activeSpan = (spanRange && sel)
+    ? (sel.spans ?? []).find((s) => s.start === spanRange.start && s.end === spanRange.end) ?? null
+    : null;
+  // What the style controls DISPLAY: box fields, overlaid with the active span's deltas.
+  const styleView = (spanRange && sel) ? { ...sel, ...(activeSpan?.style ?? {}) } : sel;
+  // Substring the active span covers (for the scope bar label).
+  const spanText = (spanRange && sel) ? (sel.content ?? "").slice(spanRange.start, spanRange.end) : "";
+
+  // Route a STYLE patch to the current scope: box → updateText; span → merge into the span delta.
+  const writeStyle = useCallback((patch) => {
+    if (!sel) return;
+    if (!spanRange) { updateText(sel.id, patch); return; }
+    const spans = [...(sel.spans ?? [])];
+    let idx = spans.findIndex((s) => s.start === spanRange.start && s.end === spanRange.end);
+    if (idx < 0) { spans.push({ start: spanRange.start, end: spanRange.end, style: {} }); idx = spans.length - 1; }
+    spans[idx] = { ...spans[idx], style: { ...spans[idx].style, ...patch } };
+    updateText(sel.id, { spans });
+  }, [sel, spanRange, updateText]);
+
+  // Begin styling the current Content selection: create/locate a span for that exact range.
+  // Reads the live textarea selection (more reliable than the polled onSelect state).
+  const styleSelection = useCallback(() => {
+    if (!sel) return;
+    const ta = contentTaRef.current;
+    const start = ta ? ta.selectionStart : contentSelRef.current.start;
+    const end   = ta ? ta.selectionEnd   : contentSelRef.current.end;
+    if (end <= start) return;
+    const spans = [...(sel.spans ?? [])];
+    if (!spans.some((s) => s.start === start && s.end === end)) {
+      spans.push({ start, end, style: {} });
+      updateText(sel.id, { spans });
+    }
+    setSpanRange({ start, end });
+  }, [sel, updateText]);
+
+  // Clear the active span (remove its overrides) and return to box scope.
+  const clearActiveSpan = useCallback(() => {
+    if (!sel || !spanRange) { setSpanRange(null); return; }
+    const spans = (sel.spans ?? []).filter((s) => !(s.start === spanRange.start && s.end === spanRange.end));
+    updateText(sel.id, { spans });
+    setSpanRange(null);
+  }, [sel, spanRange, updateText]);
+
   const applyBoxPreset = useCallback((id, presetKey) => {
     const preset = getPresetConfig(presetKey);
     updateText(id, {
@@ -897,9 +1382,15 @@ export default function TemplateEditor() {
       boxBorderOpacity: preset.borderOpacity,
       boxBorderWidth: preset.borderWidth,
       boxRadius:      preset.radius,
-      boxPaddingX:    preset.paddingX,
-      boxPaddingY:    preset.paddingY,
+      // Switching box style resets to symmetric padding (overrides any per-side tweak).
+      boxPaddingTop:    preset.paddingY,
+      boxPaddingRight:  preset.paddingX,
+      boxPaddingBottom: preset.paddingY,
+      boxPaddingLeft:   preset.paddingX,
+      boxPaddingX: undefined,
+      boxPaddingY: undefined,
       boxFadeEdges: preset.fadeEdges ?? false,
+    boxFeather: preset.feather ?? 30,
     });
   }, [updateText]);
 
@@ -963,6 +1454,25 @@ export default function TemplateEditor() {
     setSelectedText(null);
   };
 
+  // Remove every page (images + subtitles). History only snapshots texts per page index, so a
+  // full page wipe is NOT undoable — hence the confirm. Presets/recent colors are untouched.
+  const clearAllPages = () => {
+    if (pages.length === 0) return;
+    if (!window.confirm(`Remove ALL ${pages.length} page(s) and their subtitles?\n\nStyle presets and recent colors are kept. This cannot be undone.`)) return;
+    setPages([]);
+    setCurrentPage(0);
+    setSelectedText(null);
+    setSpanRange(null);
+    historyRef.current = [];
+    historyIdxRef.current = -1;
+    // Persist the wipe IMMEDIATELY — the autosave is debounced 2s, and closing the app inside
+    // that window would resurrect the cleared pages on next launch.
+    const payload = JSON.stringify({ storyId, pages: [] });
+    const api = window.templateEditorDesktop;
+    if (api?.saveSession) api.saveSession(payload).catch(() => {});
+    else { try { localStorage.setItem("ymi-session", payload); } catch { /* ignore */ } }
+  };
+
   // ── Style presets ──────────────────────────────────────────────────────────
   const confirmSavePreset = useCallback(() => {
     if (!sel || presetDraft === null) return;
@@ -973,11 +1483,61 @@ export default function TemplateEditor() {
     setPresetDraft(null);
   }, [sel, presetDraft, presets.length]);
 
+  // Save the {name} token's EFFECTIVE style (base text ⊕ nameStyle overrides) as a preset.
+  // Snapshotting the resolved style makes the preset self-contained: applying it elsewhere
+  // reproduces the exact look regardless of the target box's base style. Marked source:"name"
+  // so preset lists can badge it; it lives in the same ymi-style-presets pool and can be
+  // applied to whole boxes too (NAME_STYLE_KEYS ⊂ STYLE_PRESET_KEYS).
+  const confirmSaveNamePreset = useCallback(() => {
+    if (!sel?.nameStyle?.enabled || namePresetDraft === null) return;
+    const name = namePresetDraft.trim() || `Name style ${presets.length + 1}`;
+    const eff = resolveNameStyle(sel); // full effective item for the {name} token
+    const styles = {};
+    NAME_STYLE_KEYS.forEach((k) => { if (eff[k] !== undefined) styles[k] = eff[k]; });
+    setPresets((prev) => [...prev, { id: Date.now().toString(36) + Math.random().toString(36).slice(2, 5), name, styles, source: "name" }]);
+    setNamePresetDraft(null);
+  }, [sel, namePresetDraft, presets.length]);
+
+  // Show the revertable "Applied X · Undo" toast for 6s.
+  const showPresetUndo = useCallback((textId, beforePatch, name, scope) => {
+    setPresetUndo({ textId, beforePatch, name, scope });
+    if (presetUndoTimerRef.current) clearTimeout(presetUndoTimerRef.current);
+    presetUndoTimerRef.current = setTimeout(() => setPresetUndo(null), 6000);
+  }, []);
+
+  // Apply a saved preset to the whole text box. Captures the prior values of the
+  // exact keys the preset overwrites, so the apply can be cleanly reverted.
   const applyPreset = useCallback((preset) => {
     if (!sel) return;
+    const styles = normalizePaddingStyles(preset.styles); // migrate legacy symmetric padding
+    const before = {};
+    Object.keys(styles).forEach((k) => { before[k] = sel[k]; });
     saveHistory("Apply style preset");
-    updateText(sel.id, preset.styles);
-  }, [sel, saveHistory, updateText]);
+    updateText(sel.id, styles);
+    showPresetUndo(sel.id, before, preset.name, "box");
+  }, [sel, saveHistory, updateText, showPresetUndo]);
+
+  // Apply a saved preset to the {name} token only. The {name} sub-style supports a
+  // smaller key set than a full preset, so we take the intersection with NAME_STYLE_KEYS
+  // and merge it into nameStyle — box/underline/transform/bevel/texture keys are ignored.
+  const applyPresetToName = useCallback((preset) => {
+    if (!sel?.nameStyle?.enabled) return;
+    const filtered = {};
+    NAME_STYLE_KEYS.forEach((k) => { if (preset.styles[k] !== undefined) filtered[k] = preset.styles[k]; });
+    if (Object.keys(filtered).length === 0) return;
+    const beforeNameStyle = JSON.parse(JSON.stringify(sel.nameStyle));
+    saveHistory("Apply preset to name");
+    updateText(sel.id, { nameStyle: { ...sel.nameStyle, ...filtered } });
+    showPresetUndo(sel.id, { nameStyle: beforeNameStyle }, preset.name, "name");
+  }, [sel, saveHistory, updateText, showPresetUndo]);
+
+  // Revert the last preset apply to the exact state captured before it.
+  const undoPresetApply = useCallback(() => {
+    if (!presetUndo) return;
+    updateText(presetUndo.textId, presetUndo.beforePatch);
+    setPresetUndo(null);
+    if (presetUndoTimerRef.current) clearTimeout(presetUndoTimerRef.current);
+  }, [presetUndo, updateText]);
 
   const deletePreset = useCallback((id) => {
     setPresets((prev) => prev.filter((p) => p.id !== id));
@@ -986,6 +1546,14 @@ export default function TemplateEditor() {
   const addRecentColor = useCallback((hex) => {
     if (!hex || !hex.startsWith("#")) return;
     setRecentColors((prev) => [hex, ...prev.filter((c) => c !== hex)].slice(0, 6));
+  }, []);
+
+  // Remember a dialled-in custom gradient so it can be re-applied from the Color panel.
+  const addRecentGradient = useCallback((g) => {
+    if (!g?.start || !g?.end) return;
+    const norm = { start: g.start, end: g.end, angle: g.angle ?? 180 };
+    const key = (x) => `${x.start}|${x.end}|${x.angle}`.toUpperCase();
+    setRecentGradients((prev) => [norm, ...prev.filter((c) => key(c) !== key(norm))].slice(0, 6));
   }, []);
 
   const handleDragStart = (e, id) => {
@@ -1188,12 +1756,40 @@ export default function TemplateEditor() {
     canvas.height = pageData.height;
     const ctx = canvas.getContext("2d");
 
+    // Make sure every font used on this page is loaded before we measure/draw —
+    // otherwise canvas silently falls back to a default face (the #1 cause of
+    // "the exported PNG looks different from the workbench").
+    const fontSpecs = new Set();
+    const addSpec = (weight, size, font) => fontSpecs.add(`${weight} ${size}px ${font}`);
+    for (const it of pageData.texts) {
+      addSpec(resolveWeight(it), it.size, it.font);
+      if (it.nameStyle?.enabled) addSpec(resolveWeight({ ...it, ...it.nameStyle }), it.nameStyle.size ?? it.size, it.nameStyle.font ?? it.font);
+      // Spans may use their own font/weight/size — preload those too, else canvas falls back.
+      for (const sp of (it.spans ?? [])) {
+        if (!sp?.style) continue;
+        const e = { ...it, ...sp.style };
+        addSpec(resolveWeight(e), e.size, e.font);
+      }
+    }
+    try { await Promise.all([...fontSpecs].map((s) => document.fonts.load(s))); await document.fonts.ready; } catch { /* ignore */ }
+
     // Background image
     const img = new Image();
     await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = pageData.image; });
     ctx.drawImage(img, 0, 0, pageData.width, pageData.height);
 
     for (const item of pageData.texts) {
+      await drawTextItem(ctx, item, resolvedName);
+    }
+
+    return new Promise((res, rej) => canvas.toBlob((b) => b ? res(b) : rej(new Error("toBlob failed")), "image/png"));
+  };
+
+  // ── Shared per-text-box drawing — the SINGLE source of truth for BOTH the live
+  // preview and PNG export, so the workbench shows exactly what gets exported.
+  // Draws box fill/border + text (all effects + mixed {name}) at the item's absolute
+  // page coordinates onto ctx. Does not clear the target or manage page-level state.
+  const drawTextItem = async (ctx, item, resolvedName) => {
       const bx = item.x;
       const by = item.y;
       const bw = item.boxWidth ?? item.maxWidth ?? MIN_BOX_WIDTH;
@@ -1209,27 +1805,25 @@ export default function TemplateEditor() {
         ctx.globalAlpha = item.opacity ?? 1;
 
         if (item.boxFadeEdges) {
-          // Cloud / Mist — single elliptical gradient matching the CSS radial-gradient(ellipse).
-          // We simulate an ellipse by scaling the coordinate system to a unit circle,
-          // drawing a circular gradient, then restoring — this gives a true ellipse.
+          // Cloud / Mist — a FEATHERED rounded rectangle: a solid rounded rect whose edges are
+          // softened with a blur, giving a uniform body that dissolves into the background.
+          // (Replaces the old elliptical radial gradient, which read as a dim oval with empty
+          // corners.) `boxFeather` = edge softness in px; the blur spreads ~feather px outward.
           const col = item.boxFillColor ?? "#FFFFFF";
           const op  = item.boxFillOpacity ?? 0.85;
-
-          ctx.beginPath();
-          ctx.roundRect(bx, by, bw, bh, r);
-          ctx.clip();
-
-          // Scale CTM so (0,0)→(1,1) maps to the box bounds — gradient unit circle = ellipse
-          ctx.translate(bx + bw / 2, by + bh / 2);
-          ctx.scale(bw / 2, bh / 2);
-
-          const grad = ctx.createRadialGradient(0, 0, 0, 0, 0, 1);
-          grad.addColorStop(0,    hexToRgba(col, op * 0.72));
-          grad.addColorStop(0.38, hexToRgba(col, op * 0.48));
-          grad.addColorStop(0.68, hexToRgba(col, op * 0.18));
-          grad.addColorStop(1,    hexToRgba(col, 0));
-          ctx.fillStyle = grad;
-          ctx.fillRect(-1, -1, 2, 2); // fills the entire unit-circle space = box area
+          const feather = Math.max(2, item.boxFeather ?? 30);
+          const pad = Math.ceil(feather * 2);
+          const off = document.createElement("canvas");
+          off.width = Math.max(1, Math.ceil(bw + pad * 2));
+          off.height = Math.max(1, Math.ceil(bh + pad * 2));
+          const oc = off.getContext("2d");
+          oc.fillStyle = hexToRgba(col, op);
+          oc.beginPath();
+          oc.roundRect(pad, pad, bw, bh, r);
+          oc.fill();
+          ctx.filter = `blur(${feather}px)`;
+          ctx.drawImage(off, bx - pad, by - pad);
+          ctx.filter = "none";
         } else {
           ctx.globalAlpha = (item.opacity ?? 1) * (item.boxFillOpacity ?? 0);
           ctx.fillStyle = item.boxFillColor ?? "#0F172A";
@@ -1253,136 +1847,311 @@ export default function TemplateEditor() {
         ctx.restore();
       }
 
-      const colorVal = item.color === "custom" ? (item.customColor ?? "#FFFFFF") : item.color;
-      ctx.fillStyle = buildCanvasGradient(ctx, colorVal, bx, by, bh, bw, item);
-
-      const fontStr = `${item.italic ? "italic " : ""}${item.bold ? "bold " : ""}${item.size}px ${item.font}`;
-      ctx.font = fontStr;
-      ctx.letterSpacing = `${item.letterSpacing ?? 0}px`;
-
-      const px_     = item.boxPaddingX ?? 0;
-      const py_     = item.boxPaddingY ?? 0;
-      const textX   = bx + px_;
-      const availW  = bw - px_ * 2;
-      const lineH   = item.size * (item.lineHeight ?? 1.2);
-      const rawContent = item.content.replace(/\{name\}/g, resolvedName);
-      const tt = item.textTransform ?? "none";
-      const content = tt === "uppercase" ? rawContent.toUpperCase()
-        : tt === "lowercase" ? rawContent.toLowerCase()
-        : tt === "capitalize" ? rawContent.replace(/\b\w/g, (c) => c.toUpperCase())
-        : rawContent;
-      const lines  = wrapTextCanvas(ctx, content, availW);
+      const pad    = resolvePad(item);
+      const padL = pad.left, padR = pad.right, padT = pad.top, padB = pad.bottom;
+      const valign = item.verticalAlign ?? "top";
+      const textX  = bx + padL;
+      const availW = bw - padL - padR;
+      const cxCenter = bx + padL + availW / 2; // horizontal center of the padded text area
+      // Vertical offset of the whole text block within the padded box area (top/middle/bottom).
+      const vBlockOffset = (lineCount, lineH) => {
+        const paddedH = bh - padT - padB;
+        const textH = Math.max(0, lineCount) * lineH;
+        if (valign === "middle") return Math.max(0, (paddedH - textH) / 2);
+        if (valign === "bottom") return Math.max(0, paddedH - textH);
+        return 0;
+      };
       const align  = item.textAlign ?? "left";
-      ctx.textAlign = align;
-      const alignX = align === "center" ? bx + bw / 2 : align === "right" ? bx + bw - px_ : textX;
+      const tt     = item.textTransform ?? "none";
+      const applyTT = (s) => applyTransform(s, tt); // single source of truth (module-level)
 
-      const drawLines = (cx, drawFn) =>
-        lines.forEach((line, li) => drawFn(line, cx, by + py_ + item.size + li * lineH));
+      const nameEff = resolveNameStyle(item);
+      const hasNameStyle = nameEff && item.content.includes("{name}");
+      const hasSpans = Array.isArray(item.spans) && item.spans.some((s) => s && s.style && s.end > s.start);
 
-      // Glow
-      if (item.glow) {
-        ctx.save();
-        ctx.shadowColor   = hexToRgba(item.glowColor ?? "#FFD700", item.glowOpacity ?? 0.85);
-        ctx.shadowBlur    = item.glowBlur ?? 20;
-        ctx.shadowOffsetX = 0;
-        ctx.shadowOffsetY = 0;
-        ctx.fillStyle     = hexToRgba(item.glowColor ?? "#FFD700", 0.001);
-        for (let g = 0; g < 3; g++) drawLines(alignX, (ln, ax, ay) => ctx.fillText(ln, ax, ay));
-        ctx.restore();
-      }
+      // ── Helper: set canvas font state for a given effective item ─────────────
+      const setFont = (eff) => {
+        ctx.font = `${eff.italic ? "italic " : ""}${resolveWeight(eff)} ${eff.size}px ${eff.font}`;
+        ctx.letterSpacing = `${eff.letterSpacing ?? 0}px`;
+      };
 
-      // Bevel
-      if (item.bevel) {
-        ctx.save();
-        const depth = item.bevelDepth ?? 4;
-        const sh = item.bevelShadow    ?? "#000000";
-        const hi = item.bevelHighlight ?? "#FFFFFF";
-        const drawBevelSteps = (fillStyle) => {
-          for (let i = depth; i >= 1; i--) {
-            const alpha = 0.08 + ((depth - i + 1) / depth) * 0.42;
-            ctx.save();
-            ctx.globalAlpha = alpha;
-            ctx.fillStyle   = fillStyle;
-            drawLines(alignX + i, (ln, ax, ay) => ctx.fillText(ln, ax, ay + i));
-            ctx.restore();
-          }
-        };
-        if (item.bevelTexture) {
-          const texImg = await new Promise((res) => {
-            const ti = new Image(); ti.onload = () => res(ti); ti.onerror = () => res(null); ti.src = item.bevelTexture;
-          });
-          texImg ? drawBevelSteps(ctx.createPattern(texImg, "repeat")) : drawBevelSteps(hexToRgba(sh, 1));
+      if (!hasNameStyle && !hasSpans) {
+        // ── Single-style rendering (original path) ─────────────────────────────
+        const colorVal = item.color === "custom" ? (item.customColor ?? "#FFFFFF") : item.color;
+        ctx.fillStyle  = buildCanvasGradient(ctx, colorVal, bx, by, bh, bw, item);
+        const fontStr  = `${item.italic ? "italic " : ""}${resolveWeight(item)} ${item.size}px ${item.font}`;
+        ctx.font       = fontStr;
+        ctx.letterSpacing = `${item.letterSpacing ?? 0}px`;
+        const lineH    = item.size * (item.lineHeight ?? 1.2);
+        const content  = applyTT(item.content.replace(/\{name\}/g, resolvedName));
+        const lines    = wrapTextCanvas(ctx, content, availW);
+        const vOffset  = vBlockOffset(lines.length, lineH);
+        ctx.textAlign  = align;
+        const alignX   = align === "center" ? cxCenter : align === "right" ? bx + bw - padR : textX;
+        const drawLines = (cx, drawFn) => lines.forEach((line, li) => drawFn(line, cx, by + padT + vOffset + item.size + li * lineH));
+
+        // Glow: the halo is the SHADOW of opaque glyphs (Chromium scales shadow alpha by the
+        // source alpha, so a near-transparent fill yields NO glow). The opaque glyph is covered
+        // by the later fill pass, leaving only the blurred halo. Drawn 3× to intensify.
+        if (item.glow) { ctx.save(); ctx.shadowColor = hexToRgba(item.glowColor ?? "#FFD700", item.glowOpacity ?? 0.85); ctx.shadowBlur = item.glowBlur ?? 20; ctx.shadowOffsetX = 0; ctx.shadowOffsetY = 0; ctx.fillStyle = item.glowColor ?? "#FFD700"; for (let g = 0; g < 3; g++) drawLines(alignX, (ln, ax, ay) => ctx.fillText(ln, ax, ay)); ctx.restore(); }
+        if (item.bevel) {
+          ctx.save();
+          const depth = item.bevelDepth ?? 4; const sh = item.bevelShadow ?? "#000000"; const hi = item.bevelHighlight ?? "#FFFFFF";
+          const drawBevelSteps = (fs) => { for (let i = depth; i >= 1; i--) { const a = 0.08 + ((depth-i+1)/depth)*0.42; ctx.save(); ctx.globalAlpha = a; ctx.fillStyle = fs; drawLines(alignX+i,(ln,ax,ay)=>ctx.fillText(ln,ax,ay+i)); ctx.restore(); } };
+          if (item.bevelTexture) { const ti = await new Promise(res=>{const img=new Image();img.onload=()=>res(img);img.onerror=()=>res(null);img.src=item.bevelTexture;}); ti?drawBevelSteps(ctx.createPattern(ti,"repeat")):drawBevelSteps(hexToRgba(sh,1)); } else { for(let i=depth;i>=1;i--){const a=0.08+((depth-i+1)/depth)*0.42;ctx.fillStyle=hexToRgba(sh,a);drawLines(alignX+i,(ln,ax,ay)=>ctx.fillText(ln,ax,ay+i));} }
+          ctx.fillStyle = hexToRgba(hi, 0.35); drawLines(alignX-1,(ln,ax,ay)=>ctx.fillText(ln,ax,ay-1)); ctx.restore();
+        }
+        // Shadow: cast by an OPAQUE glyph (Chromium scales shadow alpha by source alpha, so a
+        // near-transparent fill = no shadow). The glyph is overwritten by the later fill pass.
+        if (item.shadow) { ctx.save(); ctx.shadowColor=hexToRgba(item.shadowColor??"#000000",item.shadowOpacity??0.5); ctx.shadowBlur=item.shadowBlur??8; ctx.shadowOffsetX=item.shadowOffsetX??2; ctx.shadowOffsetY=item.shadowOffsetY??4; ctx.fillStyle=hexToRgba(item.shadowColor??"#000000",1); drawLines(alignX,(ln,ax,ay)=>ctx.fillText(ln,ax,ay)); ctx.restore(); }
+        if (item.stroke) { ctx.lineWidth=item.strokeWidth??4; ctx.strokeStyle=hexToRgba(item.strokeColor??"#000000",item.strokeOpacity??1); ctx.lineJoin="round"; drawLines(alignX,(ln,ax,ay)=>ctx.strokeText(ln,ax,ay)); }
+        ctx.shadowColor="transparent"; ctx.shadowBlur=0; ctx.shadowOffsetX=0; ctx.shadowOffsetY=0;
+        if (item.textureImage) {
+          const off=document.createElement("canvas"); off.width=bw; off.height=bh; const oc=off.getContext("2d");
+          oc.font=fontStr; oc.letterSpacing=`${item.letterSpacing??0}px`; oc.textAlign=align;
+          const oax=align==="center"?(padL+availW/2):align==="right"?(bw-padR):padL; oc.fillStyle="#fff";
+          lines.forEach((line,li)=>oc.fillText(line,oax,padT+vOffset+item.size+li*lineH));
+          const ti=new Image(); await new Promise(res=>{ti.onload=res;ti.src=item.textureImage;}); oc.globalCompositeOperation="source-in"; oc.drawImage(ti,0,0,bw,bh); ctx.drawImage(off,bx,by);
         } else {
-          for (let i = depth; i >= 1; i--) {
-            const alpha = 0.08 + ((depth - i + 1) / depth) * 0.42;
-            ctx.fillStyle = hexToRgba(sh, alpha);
-            drawLines(alignX + i, (ln, ax, ay) => ctx.fillText(ln, ax, ay + i));
+          lines.forEach((line, li) => ctx.fillText(line, alignX, by + padT + vOffset + item.size + li * lineH));
+        }
+      } else {
+        // ── General multi-run rendering — handles {name} AND per-character span overrides ──
+        // Content is split into WORDS (the unit of line-wrapping) made of RUNS (the unit of
+        // styling/drawing). A run is a maximal stretch of characters sharing one effective style:
+        //   base item ⊕ nameStyle (for the {name} token) ⊕ the span override covering those chars.
+        // The old {name} mixed mode is just the special case "one run = the name". Every effect
+        // pass (glow/bevel/shadow/stroke/fill+texture) reads run.eff so each run is independent.
+        const spans = (item.spans ?? []).filter((s) => s && s.style && s.end > s.start);
+        const nameStyleObj = item.nameStyle?.enabled ? item.nameStyle : null;
+        const baseTT = item.textTransform ?? "none";
+        // The span.style object reference covering a raw-content offset (last match wins).
+        const spanRefAt = (pos) => { let st = null; for (const s of spans) if (pos >= s.start && pos < s.end) st = s.style; return st; };
+        // Fully-resolved effective style for a run: clone base, layer nameStyle then span delta.
+        const effFor = (spanStyle, isName) => {
+          const eff = { ...item };
+          if (isName && nameStyleObj) NAME_STYLE_KEYS.forEach((k) => { if (nameStyleObj[k] != null) eff[k] = nameStyleObj[k]; });
+          if (spanStyle)             NAME_STYLE_KEYS.forEach((k) => { if (spanStyle[k]   != null) eff[k] = spanStyle[k]; });
+          return eff;
+        };
+
+        // 1. Split raw content into {name} / literal segments, tracking raw offsets so spans map.
+        const segs = [];
+        { const re = /\{name\}/g; let last = 0, m;
+          while ((m = re.exec(item.content)) !== null) {
+            if (m.index > last) segs.push({ text: item.content.slice(last, m.index), rawStart: last, isName: false });
+            segs.push({ text: "{name}", rawStart: m.index, isName: true });
+            last = m.index + m[0].length;
+          }
+          if (last < item.content.length) segs.push({ text: item.content.slice(last), rawStart: last, isName: false });
+          if (segs.length === 0) segs.push({ text: "", rawStart: 0, isName: false });
+        }
+
+        // 2. Build words → runs. Words break at spaces/newlines; runs break at span/name edges.
+        const words = [];
+        let cur = null;
+        const flush = () => { if (cur && cur.runs.length) words.push(cur); cur = null; };
+        const startWord = () => { if (!cur) cur = { runs: [], isSpace: false }; return cur; };
+        const addChar = (ch, spanRef) => {
+          const w = startWord();
+          const lastRun = w.runs[w.runs.length - 1];
+          if (lastRun && lastRun.spanRef === spanRef && !lastRun.isName) lastRun.raw += ch;
+          else w.runs.push({ raw: ch, spanRef, isName: false });
+        };
+        for (const seg of segs) {
+          if (seg.isName) {
+            flush();
+            words.push({ runs: [{ raw: resolvedName, spanRef: spanRefAt(seg.rawStart), isName: true }], isSpace: false });
+          } else {
+            for (let i = 0; i < seg.text.length; i++) {
+              const ch = seg.text[i];
+              if (ch === "\n") { flush(); words.push({ isNewline: true }); continue; }
+              const ref = spanRefAt(seg.rawStart + i);
+              if (ch === " ") { flush(); words.push({ runs: [{ raw: " ", spanRef: ref, isName: false }], isSpace: true }); }
+              else addChar(ch, ref);
+            }
+            flush();
           }
         }
-        ctx.fillStyle = hexToRgba(hi, 0.35);
-        drawLines(alignX - 1, (ln, ax, ay) => ctx.fillText(ln, ax, ay - 1));
-        ctx.restore();
-      }
+        flush();
 
-      // Drop shadow
-      if (item.shadow) {
+        // 3. Resolve each run's effective style + transformed text, measure with its own font.
+        const allRuns = [];
+        for (const word of words) {
+          if (word.isNewline) { word.width = 0; continue; }
+          let wsum = 0;
+          for (const run of word.runs) {
+            run.eff  = effFor(run.spanRef, run.isName);
+            run.text = applyTransform(run.raw, run.eff.textTransform ?? baseTT);
+            setFont(run.eff);
+            run.width = ctx.measureText(run.text).width;
+            wsum += run.width;
+            allRuns.push(run);
+          }
+          word.width = wsum;
+        }
+        // Line height = tallest run's line box (keeps multi-size lines from overlapping).
+        const lineH = Math.max(
+          item.size * (item.lineHeight ?? 1.2),
+          ...allRuns.map((r) => (r.eff.size ?? item.size) * (r.eff.lineHeight ?? item.lineHeight ?? 1.2)),
+        );
+
+        // 4. Pack WORDS into lines (word-level wrapping keeps a word's runs together on one line).
+        const mixedLines = [[]];
+        let lw = 0;
+        for (const word of words) {
+          if (word.isNewline) { mixedLines.push([]); lw = 0; continue; }
+          if (word.isSpace && lw === 0) continue; // skip leading spaces on new lines
+          if (!word.isSpace && lw + word.width > availW && lw > 0) { mixedLines.push([]); lw = 0; }
+          mixedLines[mixedLines.length - 1].push(word);
+          lw += word.width;
+        }
+        const vOffset = vBlockOffset(mixedLines.length, lineH);
+
+        // Alignment width must IGNORE trailing (and leading) spaces — exactly like the single-
+        // style path, whose wrapped line strings carry no trailing space. Counting a wrapped
+        // line's trailing space here would shift centered/right text off by ~half a space width
+        // per line (severe at subtitle sizes), misaligning lines against each other.
+        const lineContentWidth = (line) => {
+          let s = 0, e = line.length;
+          while (s < e && line[s].isSpace) s++;
+          while (e > s && line[e - 1].isSpace) e--;
+          let w = 0; for (let i = s; i < e; i++) w += line[i].width;
+          return w;
+        };
+        const lineStartX = (line) => {
+          const totalW = lineContentWidth(line);
+          if (align === "center") return cxCenter - totalW / 2;
+          if (align === "right")  return bx + bw - padR - totalW;
+          return textX;
+        };
+        // Iterate every run with its baseline (x, y). Baseline ascent stays at item.size — the
+        // same as the previous {name} mixed path — so existing layouts don't shift vertically.
+        const forEachRun = (cb) => {
+          mixedLines.forEach((line, li) => {
+            const y = by + padT + vOffset + item.size + li * lineH;
+            let x = lineStartX(line);
+            for (const word of line) for (const run of word.runs) { cb(run, x, y); x += run.width; }
+          });
+        };
+
+        // Runs are positioned manually at their LEFT edge (lineStartX + advance). fillText/
+        // strokeText honour ctx.textAlign, so we MUST pin it to "left" — otherwise a center/right
+        // textAlign left over from a previously-drawn item (the single-style path sets it) would
+        // re-anchor every run and shatter the layout. Same for the baseline.
+        ctx.textAlign = "left";
+        ctx.textBaseline = "alphabetic";
+
+        // 5. Glow (per-run; opaque source so the shadow halo actually renders — covered by fill).
         ctx.save();
-        ctx.shadowColor   = hexToRgba(item.shadowColor ?? "#000000", item.shadowOpacity ?? 0.5);
-        ctx.shadowBlur    = item.shadowBlur ?? 8;
-        ctx.shadowOffsetX = item.shadowOffsetX ?? 2;
-        ctx.shadowOffsetY = item.shadowOffsetY ?? 4;
-        ctx.fillStyle     = hexToRgba("#000000", 0.001);
-        drawLines(alignX, (ln, ax, ay) => ctx.fillText(ln, ax, ay));
+        ctx.shadowOffsetX = 0; ctx.shadowOffsetY = 0;
+        forEachRun((run, x, y) => {
+          const eff = run.eff;
+          if (!eff.glow) return;
+          ctx.save();
+          ctx.shadowColor = hexToRgba(eff.glowColor ?? "#FFD700", eff.glowOpacity ?? 0.85);
+          ctx.shadowBlur  = eff.glowBlur ?? 20;
+          ctx.fillStyle   = eff.glowColor ?? "#FFD700";
+          setFont(eff);
+          for (let g = 0; g < 3; g++) ctx.fillText(run.text, x, y);
+          ctx.restore();
+        });
         ctx.restore();
-      }
 
-      // Stroke
-      if (item.stroke) {
-        ctx.lineWidth   = item.strokeWidth ?? 4;
-        ctx.strokeStyle = hexToRgba(item.strokeColor ?? "#000000", item.strokeOpacity ?? 1);
-        ctx.lineJoin    = "round";
-        drawLines(alignX, (ln, ax, ay) => ctx.strokeText(ln, ax, ay));
-      }
+        // 6. Bevel (per-run).
+        forEachRun((run, x, y) => {
+          const eff = run.eff;
+          if (!eff.bevel) return;
+          ctx.save();
+          setFont(eff);
+          const depth = eff.bevelDepth ?? 4; const sh = eff.bevelShadow ?? "#000000"; const hi = eff.bevelHighlight ?? "#FFFFFF";
+          for (let i = depth; i >= 1; i--) {
+            const a = 0.08 + ((depth - i + 1) / depth) * 0.42;
+            ctx.globalAlpha = a; ctx.fillStyle = hexToRgba(sh, a); ctx.fillText(run.text, x + i, y + i);
+          }
+          ctx.globalAlpha = 1;
+          ctx.fillStyle = hexToRgba(hi, 0.35); ctx.fillText(run.text, x - 1, y - 1);
+          ctx.restore();
+        });
 
-      // Clear shadow state
-      ctx.shadowColor = "transparent"; ctx.shadowBlur = 0; ctx.shadowOffsetX = 0; ctx.shadowOffsetY = 0;
+        // 7. Shadow (per-run; opaque source).
+        ctx.save();
+        forEachRun((run, x, y) => {
+          const eff = run.eff;
+          if (!eff.shadow) return;
+          ctx.save();
+          ctx.shadowColor   = hexToRgba(eff.shadowColor ?? "#000000", eff.shadowOpacity ?? 0.5);
+          ctx.shadowBlur    = eff.shadowBlur ?? 8;
+          ctx.shadowOffsetX = eff.shadowOffsetX ?? 2;
+          ctx.shadowOffsetY = eff.shadowOffsetY ?? 4;
+          ctx.fillStyle     = hexToRgba(eff.shadowColor ?? "#000000", 1);
+          setFont(eff);
+          ctx.fillText(run.text, x, y);
+          ctx.restore();
+        });
+        ctx.restore();
 
-      // Fill / texture
-      if (item.textureImage) {
-        const off    = document.createElement("canvas");
-        off.width    = bw; off.height = bh;
-        const offCtx = off.getContext("2d");
-        offCtx.font          = fontStr;
-        offCtx.letterSpacing = `${item.letterSpacing ?? 0}px`;
-        offCtx.textAlign     = align;
-        const offAlignX      = align === "center" ? bw / 2 : align === "right" ? bw - px_ : px_;
-        offCtx.fillStyle     = "#fff";
-        lines.forEach((line, li) => offCtx.fillText(line, offAlignX, py_ + item.size + li * lineH));
-        const texImg = new Image();
-        await new Promise((res) => { texImg.onload = res; texImg.src = item.textureImage; });
-        offCtx.globalCompositeOperation = "source-in";
-        offCtx.drawImage(texImg, 0, 0, bw, bh);
-        ctx.drawImage(off, bx, by);
-      } else {
-        lines.forEach((line, li) => ctx.fillText(line, alignX, by + py_ + item.size + li * lineH));
+        // 8. Stroke (per-run).
+        forEachRun((run, x, y) => {
+          const eff = run.eff;
+          if (!eff.stroke) return;
+          setFont(eff);
+          ctx.lineWidth   = eff.strokeWidth ?? 4;
+          ctx.strokeStyle = hexToRgba(eff.strokeColor ?? "#000000", eff.strokeOpacity ?? 1);
+          ctx.lineJoin    = "round";
+          ctx.strokeText(run.text, x, y);
+        });
+
+        // 9. Fill (per-run gradient/solid OR texture mask). Textures preloaded once per src.
+        const loadImg = (src) => new Promise((res) => { if (!src) return res(null); const im = new Image(); im.onload = () => res(im); im.onerror = () => res(null); im.src = src; });
+        const texSrcs = [...new Set(allRuns.map((r) => r.eff.textureImage).filter(Boolean))];
+        const texMap = new Map();
+        for (const src of texSrcs) texMap.set(src, await loadImg(src));
+        ctx.shadowColor = "transparent"; ctx.shadowBlur = 0; ctx.shadowOffsetX = 0; ctx.shadowOffsetY = 0;
+        forEachRun((run, x, y) => {
+          const eff = run.eff;
+          setFont(eff);
+          const tex = eff.textureImage ? texMap.get(eff.textureImage) : null;
+          if (tex) {
+            // Texture fill: mask the texture to this run's glyphs via an offscreen canvas.
+            const w = Math.max(1, Math.ceil(run.width) + 2);
+            const h = Math.max(1, Math.ceil(eff.size * 1.5));
+            const asc = eff.size; // baseline within the offscreen
+            const off = document.createElement("canvas"); off.width = w; off.height = h;
+            const oc = off.getContext("2d");
+            oc.font = ctx.font; oc.letterSpacing = `${eff.letterSpacing ?? 0}px`; oc.fillStyle = "#fff";
+            oc.fillText(run.text, 0, asc);
+            oc.globalCompositeOperation = "source-in";
+            oc.drawImage(tex, 0, 0, w, h);
+            ctx.drawImage(off, x, y - asc);
+          } else {
+            const cVal = eff.color === "custom" ? (eff.customColor ?? "#FFFFFF") : eff.color;
+            ctx.fillStyle = buildCanvasGradient(ctx, cVal, x, y - eff.size, eff.size, run.width || 1, eff);
+            ctx.fillText(run.text, x, y);
+          }
+        });
       }
 
       ctx.restore();
-    }
-
-    return new Promise((res, rej) => canvas.toBlob((b) => b ? res(b) : rej(new Error("toBlob failed")), "image/png"));
   };
 
   // ── Single-page PNG export (current page) ───────────────────────────────────
   const exportPNG = async () => {
     if (!page || !page.image) { alert("Please upload an image for this page first."); return; }
-    const blob = await renderPageToPngBlob(page, previewName);
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `${storyId}_page${currentPage + 1}_preview.png`;
-    a.click();
-    URL.revokeObjectURL(url);
+    try {
+      const blob = await renderPageToPngBlob(page, previewName);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${storyId}_page${currentPage + 1}_preview.png`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 30_000); // don't abort the download (browser race)
+    } catch (err) {
+      console.error("PNG export failed:", err);
+      alert(`PNG export failed: ${err?.message ?? err}`);
+    }
   };
 
   // ── Batch PNG export → single ZIP download ─────────────────────────────────
@@ -1393,40 +2162,47 @@ export default function TemplateEditor() {
     setBatchExporting(true);
     setBatchProgress({ done: 0, total: withImages.length });
 
-    const { default: JSZip } = await import("jszip");
-    const zip = new JSZip();
+    let failedPages = 0;
+    try {
+      const zip = new JSZip();
 
-    for (const { p, i } of withImages) {
-      try {
-        const blob = await renderPageToPngBlob(p, previewName);
-        const stem = p.fileName ? p.fileName.replace(/\.[^.]+$/, "") : `page_${String(i + 1).padStart(2, "0")}`;
-        // Zero-pad page number so files sort correctly in the folder
-        const filename = `${String(i + 1).padStart(2, "0")}_${stem}_subtitle.png`;
-        zip.file(filename, blob);
-      } catch (err) {
-        console.error(`Page ${i + 1} render failed:`, err);
+      for (const { p, i } of withImages) {
+        try {
+          const blob = await renderPageToPngBlob(p, previewName);
+          const stem = p.fileName ? p.fileName.replace(/\.[^.]+$/, "") : `page_${String(i + 1).padStart(2, "0")}`;
+          // Zero-pad page number so files sort correctly in the folder
+          const filename = `${String(i + 1).padStart(2, "0")}_${stem}_subtitle.png`;
+          zip.file(filename, blob);
+        } catch (err) {
+          failedPages++;
+          console.error(`Page ${i + 1} render failed:`, err);
+        }
+        setBatchProgress({ done: i + 1, total: withImages.length });
       }
-      setBatchProgress({ done: i + 1, total: withImages.length });
+
+      // PNGs are already compressed — STORE skips recompression (faster, far less memory
+      // pressure on big books; DEFLATE gained ~nothing on PNG payloads).
+      const zipBlob = await zip.generateAsync({ type: "blob", compression: "STORE" });
+
+      const url = URL.createObjectURL(zipBlob);
+      const a   = document.createElement("a");
+      a.href    = url;
+      a.download = `${storyId}_subtitles_${withImages.length}pages.zip`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      // Revoke AFTER the download has had time to start — revoking synchronously can abort
+      // the download in some browsers (Firefox/Safari race).
+      setTimeout(() => URL.revokeObjectURL(url), 30_000);
+
+      if (failedPages > 0) alert(`ZIP downloaded, but ${failedPages} page(s) failed to render — check those pages.`);
+    } catch (err) {
+      console.error("Batch export failed:", err);
+      alert(`Batch export failed: ${err?.message ?? err}\n\nIf this keeps happening, refresh the page (Ctrl+Shift+R) and try again.`);
+    } finally {
+      // Always clear the overlay — a stuck "exporting…" screen was the old failure mode.
+      setBatchExporting(false);
     }
-
-    // Generate ZIP with compression
-    const zipBlob = await zip.generateAsync({
-      type: "blob",
-      compression: "DEFLATE",
-      compressionOptions: { level: 1 }, // level 1 = fastest; PNGs are already compressed
-    }, (meta) => {
-      // meta.percent fires during ZIP generation — reuse the progress bar
-      setBatchProgress((prev) => ({ ...prev, done: Math.round(prev.total * (1 - meta.percent / 100)) + Math.round(meta.percent / 100 * prev.total) }));
-    });
-
-    const url = URL.createObjectURL(zipBlob);
-    const a   = document.createElement("a");
-    a.href    = url;
-    a.download = `${storyId}_subtitles_${withImages.length}pages.zip`;
-    a.click();
-    URL.revokeObjectURL(url);
-
-    setBatchExporting(false);
   };
 
   // ── Batch image loader ─────────────────────────────────────────────────────
@@ -1484,7 +2260,8 @@ export default function TemplateEditor() {
           if (key && byName.has(key)) {
             usedFileNames.add(key);
             const r = byName.get(key);
-            return { ...p, image: r.dataUrl, width: r.width, height: r.height };
+            // Image dims win — remap any JSON-space layout into the image's native pixels
+            return { ...rescalePageLayout(p, r.width, r.height), image: r.dataUrl };
           }
           return p; // still empty, needs positional
         });
@@ -1496,7 +2273,11 @@ export default function TemplateEditor() {
           if (p.image) return p;
           if (posIdx < positionalQueue.length) {
             const r = positionalQueue[posIdx++];
-            return { ...p, image: r.dataUrl, width: r.width, height: r.height };
+            // Image dims win — remap any JSON-space layout into the image's native pixels.
+            // Also take the file's REAL name: a positionally-filled page otherwise keeps its
+            // stale fileName (from the JSON / a previous session), which then leaks into the
+            // exported PNG names ("cache"-looking wrong names in the ZIP).
+            return { ...rescalePageLayout(p, r.width, r.height), image: r.dataUrl, fileName: r.name };
           }
           return p; // no file left for this page
         });
@@ -1519,6 +2300,19 @@ export default function TemplateEditor() {
     return GRADIENT_COLOR_MAP[color] ?? color;
   };
 
+  // Encode a span's sparse style delta for export: if it overrides the fill (color/texture),
+  // emit a lossless `fill` descriptor + flat `color` (mirroring the top-level text), and drop
+  // the editor-only raw gradient fields. Non-fill overrides (font/size/effects) pass through.
+  const exportSpanStyle = (style = {}) => {
+    const { color, customColor, customGradientStart, customGradientEnd, customGradientAngle, textureImage, ...rest } = style;
+    const out = { ...rest };
+    if (color !== undefined || textureImage !== undefined) {
+      out.color = resolveExportColor(color, customColor, customGradientStart);
+      out.fill = buildFill(color, customColor, customGradientStart, customGradientEnd, customGradientAngle, textureImage);
+    }
+    return out;
+  };
+
   const generateExport = (mode = "all") => {
     const pagesToExport = mode === "current" ? [pages[currentPage]] : pages;
     const pageOffset = mode === "current" ? currentPage : 0;
@@ -1530,10 +2324,42 @@ export default function TemplateEditor() {
         image: p.fileName ?? `page_${pageOffset + i + 1}.png`,
         width: p.width ?? 0,
         height: p.height ?? 0,
-        texts: p.texts.map(({ id, customColor, customGradientStart, color, ...t }) => ({
-          ...t,
-          color: resolveExportColor(color, customColor, customGradientStart),
-        })),
+        texts: p.texts.map((t) => {
+          const pad = resolvePad(t);
+          const {
+            id, color, customColor, customGradientStart, customGradientEnd, customGradientAngle,
+            textureImage, boxPaddingX, boxPaddingY,
+            boxPaddingTop, boxPaddingRight, boxPaddingBottom, boxPaddingLeft,
+            nameStyle, spans, ...rest
+          } = t;
+          const out = {
+            ...rest,
+            // `color` kept as a flat representative hex for simple consumers;
+            // `fill` is the canonical, lossless fill descriptor the renderer should use.
+            color: resolveExportColor(color, customColor, customGradientStart),
+            fill: buildFill(color, customColor, customGradientStart, customGradientEnd, customGradientAngle, textureImage),
+            // Canonical per-side padding (legacy symmetric boxPaddingX/Y dropped from output)
+            boxPaddingTop:    pad.top,
+            boxPaddingRight:  pad.right,
+            boxPaddingBottom: pad.bottom,
+            boxPaddingLeft:   pad.left,
+          };
+          // Per-character style runs (each style delta fill-encoded for the worker).
+          if (Array.isArray(spans) && spans.length) {
+            out.spans = spans
+              .filter((s) => s && s.end > s.start)
+              .map((s) => ({ start: s.start, end: s.end, style: exportSpanStyle(s.style ?? {}) }));
+          }
+          if (nameStyle?.enabled) {
+            out.nameStyle = {
+              ...nameStyle,
+              fill: buildFill(nameStyle.color, nameStyle.customColor, nameStyle.customGradientStart, nameStyle.customGradientEnd, nameStyle.customGradientAngle, nameStyle.textureImage),
+            };
+          } else if (nameStyle !== undefined) {
+            out.nameStyle = nameStyle; // null — no independent {name} styling
+          }
+          return out;
+        }),
       })),
     };
     setExportJSON(JSON.stringify(config, null, 2));
@@ -1561,13 +2387,16 @@ export default function TemplateEditor() {
             const byIndex = prev[jsonIdx];
             const existing = byName ?? byIndex ?? null;
 
-            return {
+            // Build the page in the JSON's own coordinate space first; if an existing image is
+            // kept, rescalePageLayout below remaps everything into the image's NATIVE pixel
+            // space (the image is the source of truth — never distort it to the JSON's dims).
+            const built = {
               // Keep the existing image if we found one; otherwise null (needs batch assign later)
               image:    existing?.image ?? null,
               fileName: p.image ?? existing?.fileName ?? "",
               width:    p.width  ?? existing?.width  ?? 2480,
               height:   p.height ?? existing?.height ?? 3508,
-              texts: (p.texts ?? []).map((t) => ({
+              texts: (p.texts ?? []).map((t) => { const rec = recoverColorDescriptor(t); return {
               id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
               role: t.role ?? "body",
               content: t.content ?? "",
@@ -1575,11 +2404,19 @@ export default function TemplateEditor() {
               y: t.y ?? 120,
               font: t.font ?? "'Lora', serif",
               size: t.size ?? 42,
-              color: t.color ?? "#FFFFFF",
-              customColor: t.customColor ?? t.color ?? "#FFFFFF",
+              // Restore the full colour descriptor from `fill` (gradients/textures survive
+              // round-trip). Falls back to flat fields for legacy templates without `fill`.
+              color: rec.color,
+              customColor: rec.customColor,
+              customGradientStart: rec.customGradientStart,
+              customGradientEnd: rec.customGradientEnd,
+              customGradientAngle: rec.customGradientAngle,
+              textureImage: rec.textureImage,
               bold: t.bold ?? false,
+              fontWeight: t.fontWeight ?? (t.bold ? 700 : 400),
               italic: t.italic ?? false,
               textAlign: t.textAlign ?? "left",
+              verticalAlign: t.verticalAlign ?? "top",
               shadow: t.shadow ?? false,
               shadowColor: t.shadowColor ?? "#000000",
               shadowOpacity: t.shadowOpacity ?? 0.5,
@@ -1600,9 +2437,12 @@ export default function TemplateEditor() {
               boxBorderOpacity: t.boxBorderOpacity ?? 0,
               boxBorderWidth: t.boxBorderWidth ?? 0,
               boxRadius: t.boxRadius ?? 0,
-              boxPaddingX: t.boxPaddingX ?? 0,
-              boxPaddingY:  t.boxPaddingY ?? 0,
+              boxPaddingTop:    t.boxPaddingTop    ?? t.boxPaddingY ?? 0,
+              boxPaddingRight:  t.boxPaddingRight  ?? t.boxPaddingX ?? 0,
+              boxPaddingBottom: t.boxPaddingBottom ?? t.boxPaddingY ?? 0,
+              boxPaddingLeft:   t.boxPaddingLeft   ?? t.boxPaddingX ?? 0,
               boxFadeEdges: t.boxFadeEdges ?? false,
+              boxFeather: t.boxFeather ?? 30,
               stroke: t.stroke ?? false,
               strokeWidth: t.strokeWidth ?? 4,
               strokeColor: t.strokeColor ?? "#000000",
@@ -1618,8 +2458,15 @@ export default function TemplateEditor() {
               glowOpacity: t.glowOpacity ?? 0.85,
               textTransform: t.textTransform ?? "none",
               underline: t.underline ?? false,
-            })),
+              nameStyle: t.nameStyle ?? null,
+              // Per-character style runs — rebuild each span's style delta (fill recovered).
+              spans: Array.isArray(t.spans)
+                ? t.spans.filter((s) => s && s.end > s.start).map((s) => ({ start: s.start, end: s.end, style: importSpanStyle(s.style ?? {}) }))
+                : [],
+            }; }),
             };
+            // Image dims win: remap the JSON-space layout into the kept image's native pixels.
+            return existing?.image ? rescalePageLayout(built, existing.width, existing.height) : built;
           }));
           setCurrentPage(0);
           setSelectedText(null);
@@ -1644,11 +2491,23 @@ export default function TemplateEditor() {
     URL.revokeObjectURL(url);
   };
 
-  const sel = page?.texts.find((t) => t.id === selectedText) ?? null;
-
   // Sync local textarea content whenever selection changes to a different text box
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => { setLocalContent(sel?.content ?? ""); }, [sel?.id]);
+  useEffect(() => { setLocalContent(sel?.content ?? ""); setSpanRange(null); }, [sel?.id]);
+
+  // Commit Content edits, remapping span offsets so per-character styling survives text edits.
+  const commitContent = useCallback((newContent) => {
+    if (!sel) return;
+    setPages((prev) => {
+      const updated = [...prev];
+      const p = { ...updated[currentPage] };
+      p.texts = p.texts.map((t) => t.id === sel.id
+        ? { ...t, content: newContent, spans: remapSpans(t.spans, t.content ?? "", newContent) }
+        : t);
+      updated[currentPage] = p;
+      return updated;
+    });
+  }, [sel, currentPage]);
 
   // RAF-throttled updateText for sliders — caps React renders at 60fps during scrub
   const sliderUpdate = useCallback((id, updates) => {
@@ -1656,22 +2515,33 @@ export default function TemplateEditor() {
     sliderRAFRef.current = requestAnimationFrame(() => updateText(id, updates));
   }, [updateText]);
 
-  const pageHeight = page ? CANVAS_WIDTH * (page.height / page.width) : 0;
-  const renderedCanvasWidth = page ? page.width * scale : CANVAS_WIDTH * viewportZoom;
-  const renderedCanvasHeight = page ? page.height * scale : pageHeight * viewportZoom;
+  // Scope-routed write helpers used by the style+effects panel. Defined here (not inside the
+  // panel's IIFE) so the IIFE can alias them by a DIFFERENT name — aliasing a same-named const
+  // inside the block would hit the temporal dead zone and blank the app on render.
+  const styleScopeUpdate = (_id, patch) => writeStyle(patch);
+  const styleScopeSlider = spanRange ? ((_id, patch) => writeStyle(patch)) : sliderUpdate;
+  const styleScopeTexture = (prop, label) => (e) => {
+    const file = e.target.files?.[0]; if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => { saveHistory(label); writeStyle({ [prop]: ev.target.result }); };
+    reader.readAsDataURL(file); e.target.value = "";
+  };
+
+  const renderedCanvasWidth = page ? page.width * scale : 0;
+  const renderedCanvasHeight = page ? page.height * scale : 0;
 
   useEffect(() => {
     const handleKeyDown = (event) => {
       if (!(event.ctrlKey || event.metaKey)) return;
       if (event.key === "+" || event.key === "=") {
         event.preventDefault();
-        setViewportZoom((prev) => Math.min(2.5, Number((prev + 0.1).toFixed(2))));
+        setViewportZoom((prev) => clamp(prev * ZOOM_STEP, ZOOM_MIN, ZOOM_MAX));
       } else if (event.key === "-" || event.key === "_") {
         event.preventDefault();
-        setViewportZoom((prev) => Math.max(0.5, Number((prev - 0.1).toFixed(2))));
+        setViewportZoom((prev) => clamp(prev / ZOOM_STEP, ZOOM_MIN, ZOOM_MAX));
       } else if (event.key === "0") {
         event.preventDefault();
-        setViewportZoom(1);
+        setViewportZoom(1); // Ctrl+0 = 100% = 1:1 with the exported pixels
       } else if (event.key === "z" || event.key === "Z") {
         event.preventDefault();
         if (event.shiftKey) redo(); else undo();
@@ -1698,39 +2568,15 @@ export default function TemplateEditor() {
   const HS = 9; // handle size px
 
   const renderTextBox = (item) => {
-    const displayContent = item.content.replace(/\{name\}/g, previewName);
     const boxWidth = (item.boxWidth ?? item.maxWidth ?? MIN_BOX_WIDTH) * scale;
     const boxHeight = (item.boxHeight ?? MIN_BOX_HEIGHT) * scale;
     const isSelected = selectedText === item.id;
     const isDragging = interaction?.id === item.id && interaction.type === "drag";
-    const displayStyle = {
-      ...getRenderedTextStyle(item),
-      fontSize: `${item.size * scale}px`,
-      letterSpacing: `${item.letterSpacing * scale}px`,
-      // Bevel is rendered on a separate backing layer so it never bleeds through gradient text.
-      textShadow: computeNonBevelShadow(item, scale),
-      WebkitTextStroke: item.stroke
-        ? `${(item.strokeWidth ?? 4) * scale}px ${hexToRgba(item.strokeColor ?? "#000000", item.strokeOpacity ?? 1)}`
-        : "0px transparent",
-      paintOrder: "stroke fill",
-      position: "relative",
-    };
-    const boxPaddingX = (item.boxPaddingX ?? 0) * scale;
-    const boxPaddingY = (item.boxPaddingY ?? 0) * scale;
-    const borderWidth = (item.boxBorderWidth ?? 0) * scale;
-
-    // Cloud/mist: single smooth elliptical gradient — no flat zones, no stacking.
-    // opacity multiplier keeps the center visually soft even at high fillOpacity.
-    const cloudBg = (() => {
-      if (!item.boxFadeEdges || (item.boxFillOpacity ?? 0) === 0) return null;
-      const c  = item.boxFillColor ?? "#FFFFFF";
-      const op = item.boxFillOpacity ?? 0.85;
-      return `radial-gradient(ellipse at center, ${hexToRgba(c, op * 0.72)} 0%, ${hexToRgba(c, op * 0.48)} 38%, ${hexToRgba(c, op * 0.18)} 68%, transparent 100%)`;
-    })();
 
     return (
       <div
         key={item.id}
+        data-text-id={item.id}
         ref={(el) => {
           if (el) textBoxRefs.current.set(item.id, el);
           else textBoxRefs.current.delete(item.id);
@@ -1742,45 +2588,17 @@ export default function TemplateEditor() {
           top: item.y * scale,
           width: boxWidth,
           height: boxHeight,
-          border: borderWidth > 0 ? `${Math.max(1, borderWidth)}px solid ${hexToRgba(item.boxBorderColor ?? "#FFFFFF", item.boxBorderOpacity ?? 0)}` : "none",
+          // Box fill + border are painted by drawTextItem on the canvas (so preview === export);
+          // the wrapper only carries selection outline + drag/resize affordances.
           outline: isSelected ? "2px solid rgba(56,189,248,0.9)" : "none",
           outlineOffset: "1px",
-          borderRadius: (item.boxRadius ?? 0) * scale,
-          background: cloudBg ?? hexToRgba(item.boxFillColor ?? "#0F172A", item.boxFillOpacity ?? 0),
           boxSizing: "border-box",
           cursor: isDragging ? "grabbing" : "grab",
           userSelect: "none",
           overflow: "visible",
         }}
       >
-        <div
-          style={{
-            padding: `${boxPaddingY}px ${boxPaddingX}px`,
-            width: "100%",
-            height: "100%",
-            boxSizing: "border-box",
-            pointerEvents: "none",
-          }}
-        >
-          <div style={displayStyle}>
-            {item.bevel && (
-              <span style={{
-                position: "absolute",
-                inset: 0,
-                zIndex: 0,
-                color: item.bevelShadow ?? "#000000",
-                WebkitTextFillColor: item.bevelShadow ?? "#000000",
-                textShadow: computeBevelShadow(item, scale),
-                pointerEvents: "none",
-              }}>
-                {displayContent}
-              </span>
-            )}
-            <span style={{ ...getTextColorStyle(item), position: "relative", zIndex: 1 }}>
-              {displayContent}
-            </span>
-          </div>
-        </div>
+        <TextBoxCanvas item={item} previewName={previewName} scale={scale} draw={drawTextItem} />
 
         {isSelected && RESIZE_HANDLES.map((h) => (
           <div
@@ -1882,7 +2700,7 @@ export default function TemplateEditor() {
             >
               <div onClick={() => setCurrentPage(i)} style={{ cursor: "pointer" }}>
                 {p.image
-                  ? <img src={p.image} alt={`Page ${i + 1}`} style={{ width: "100%", borderRadius: 4, display: "block" }} />
+                  ? <img src={p.image} alt={`Page ${i + 1}`} style={{ width: "100%", aspectRatio: `${p.width} / ${p.height}`, objectFit: "fill", borderRadius: 4, display: "block" }} />
                   : (
                     <div style={{ width: "100%", aspectRatio: "3/4", background: "#1a1a1a", borderRadius: 4, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 4, padding: 4 }}>
                       <span style={{ fontSize: 18 }}>🖼️</span>
@@ -1902,24 +2720,43 @@ export default function TemplateEditor() {
             </div>
           ))}
 
+          {pages.length > 0 && (
+            <button
+              onClick={clearAllPages}
+              title="Remove all pages and their subtitles (style presets are kept)"
+              style={{ width: "100%", marginTop: 4, background: "#1a0d0d", border: "1px solid #5a1a1a", borderRadius: 8, padding: "7px 0", color: "#f87171", fontSize: 11, fontWeight: 600, cursor: "pointer" }}
+            >
+              🗑 Clear all pages
+            </button>
+          )}
+
         </div>
 
-        <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", padding: 16, overflowY: "auto" }}>
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", padding: 16, minWidth: 0 }}>
           {page ? (
             <>
-              <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+              <div style={{ display: "flex", gap: 8, marginBottom: 12, justifyContent: "center", flexWrap: "wrap" }}>
                 <button onClick={addText} style={{ background: "#1A1A1A", border: "1px solid #444", borderRadius: 6, padding: "6px 16px", color: "#F5D478", fontSize: 13, cursor: "pointer" }}>+ Add text</button>
                 {sel && <button onClick={() => duplicateText(sel.id)} style={{ background: "#1A1A1A", border: "1px solid #444", borderRadius: 6, padding: "6px 16px", color: "#aaa", fontSize: 13, cursor: "pointer" }}>Duplicate</button>}
                 {sel && <button onClick={() => deleteText(sel.id)} style={{ background: "#1A1A1A", border: "1px solid #600", borderRadius: 6, padding: "6px 16px", color: "#F88", fontSize: 13, cursor: "pointer" }}>Delete</button>}
-                <div style={{ display: "flex", alignItems: "center", gap: 6, marginLeft: 8, color: "#888", fontSize: 12 }}>
-                  <button onClick={() => setViewportZoom((prev) => Math.max(0.5, Number((prev - 0.1).toFixed(2))))} style={{ background: "#1A1A1A", border: "1px solid #333", borderRadius: 6, width: 28, height: 28, color: "#ddd", cursor: "pointer" }}>−</button>
-                  <span style={{ minWidth: 44, textAlign: "center" }}>{Math.round(viewportZoom * 100)}%</span>
-                  <button onClick={() => setViewportZoom((prev) => Math.min(2.5, Number((prev + 0.1).toFixed(2))))} style={{ background: "#1A1A1A", border: "1px solid #333", borderRadius: 6, width: 28, height: 28, color: "#ddd", cursor: "pointer" }}>+</button>
+                <div style={{ display: "flex", alignItems: "center", gap: 4, marginLeft: 8, color: "#888", fontSize: 12 }}>
+                  <button onClick={() => setViewportZoom((prev) => clamp(prev / ZOOM_STEP, ZOOM_MIN, ZOOM_MAX))} title="Zoom out" style={{ background: "#1A1A1A", border: "1px solid #333", borderRadius: 6, width: 28, height: 28, color: "#ddd", cursor: "pointer" }}>−</button>
+                  <span style={{ minWidth: 46, textAlign: "center", fontVariantNumeric: "tabular-nums" }}>{Math.round(viewportZoom * 100)}%</span>
+                  <button onClick={() => setViewportZoom((prev) => clamp(prev * ZOOM_STEP, ZOOM_MIN, ZOOM_MAX))} title="Zoom in" style={{ background: "#1A1A1A", border: "1px solid #333", borderRadius: 6, width: 28, height: 28, color: "#ddd", cursor: "pointer" }}>+</button>
+                  <button onClick={() => setViewportZoom(fitZoom)} title="Fit the whole page to the view" style={{ background: "#1A1A1A", border: "1px solid #333", borderRadius: 6, height: 28, padding: "0 10px", color: "#bbb", cursor: "pointer", fontSize: 11 }}>Fit</button>
+                  <button onClick={() => setViewportZoom(1)} title="Actual size — 1:1 with the exported PNG pixels" style={{ background: viewportZoom === 1 ? "#2C2400" : "#1A1A1A", border: `1px solid ${viewportZoom === 1 ? "#F5D478" : "#333"}`, borderRadius: 6, height: 28, padding: "0 10px", color: viewportZoom === 1 ? "#F5D478" : "#bbb", cursor: "pointer", fontSize: 11 }}>100%</button>
                 </div>
               </div>
+              {/* Scroll area: the canvas is rendered at viewportZoom (100% = 1:1 with the export),
+                  centred when it fits, scrollable in both axes when zoomed past the viewport. */}
+              <div ref={scrollAreaRef} style={{ flex: 1, minHeight: 0, overflow: "auto", width: "100%" }}>
+                <div style={{ width: renderedCanvasWidth, margin: "0 auto" }}>
               <div ref={canvasRef} style={{ position: "relative", width: renderedCanvasWidth, height: renderedCanvasHeight, background: "#111", borderRadius: 8, overflow: "hidden", boxShadow: "0 4px 40px rgba(0,0,0,0.5)" }}>
                 {page.image
-                  ? <img src={page.image} alt={page.fileName} style={{ width: "100%", height: "100%", objectFit: "contain" }} draggable={false} />
+                  /* objectFit:"fill" — stretch the image to the page box EXACTLY like the export's
+                     ctx.drawImage(img, 0,0, page.width, page.height), so preview === exported PNG
+                     even when the stored page width/height differs from the image's native aspect. */
+                  ? <img src={page.image} alt={page.fileName} style={{ width: "100%", height: "100%", objectFit: "fill" }} draggable={false} />
                   : (
                     <label style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 10, color: "#555", cursor: "pointer", fontSize: 13 }}>
                       <span style={{ fontSize: 36 }}>🖼️</span>
@@ -1930,7 +2767,7 @@ export default function TemplateEditor() {
                         reader.onload = (ev) => {
                           const dataUrl = ev.target.result;
                           const img = new Image();
-                          img.onload = () => setPages((prev) => { const u = [...prev]; u[currentPage] = { ...u[currentPage], image: dataUrl, fileName: file.name, width: img.naturalWidth, height: img.naturalHeight }; return u; });
+                          img.onload = () => setPages((prev) => { const u = [...prev]; u[currentPage] = { ...rescalePageLayout(u[currentPage], img.naturalWidth, img.naturalHeight), image: dataUrl, fileName: file.name }; return u; });
                           img.src = dataUrl;
                         };
                         reader.readAsDataURL(file);
@@ -1945,8 +2782,10 @@ export default function TemplateEditor() {
                     : <div key={i} style={{ position: "absolute", top: g.pos * scale - 0.5, left: 0, right: 0, height: 1, background: "rgba(56,189,248,0.9)", pointerEvents: "none", zIndex: 20 }} />
                 )}
               </div>
-              <div style={{ fontSize: 11, color: "#555", marginTop: 8 }}>
-                Original: {page.width}x{page.height}px · Select a text box to edit it · Drag the top strip to move · Drag the bottom-right corner to resize · {`{name}`} = user's name
+                  <div style={{ fontSize: 11, color: "#555", marginTop: 8, textAlign: "center" }}>
+                    Original: {page.width}x{page.height}px · 100% = exported PNG size · Select a text box to edit · Drag the top strip to move · Drag the bottom-right corner to resize · {`{name}`} = user's name
+                  </div>
+                </div>
               </div>
             </>
           ) : (
@@ -1961,7 +2800,7 @@ export default function TemplateEditor() {
           )}
         </div>
 
-        <div style={{ width: 320, borderLeft: "1px solid #222", padding: 16, overflowY: "auto", flexShrink: 0 }}>
+        <div style={{ width: 320, borderLeft: "1px solid #222", padding: 16, overflowY: "auto", flexShrink: 0, scrollbarGutter: "stable" }}>
           {sel ? (
             <>
               {/* ── Style Presets ─────────────────────────────────────────── */}
@@ -2001,10 +2840,10 @@ export default function TemplateEditor() {
                       >
                         <button
                           onClick={() => applyPreset(preset)}
-                          title={`Apply "${preset.name}" to this text box`}
-                          style={{ flex: 1, background: "none", border: "none", color: "#C0C0C0", fontSize: 12, cursor: "pointer", textAlign: "left", padding: "6px 10px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                          title={`Apply "${preset.name}" to this text box${preset.source === "name" ? " (saved from a {name} style)" : ""}`}
+                          style={{ flex: 1, background: "none", border: "none", color: preset.source === "name" ? "#E0C878" : "#C0C0C0", fontSize: 12, cursor: "pointer", textAlign: "left", padding: "6px 10px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
                         >
-                          {preset.name}
+                          {preset.source === "name" ? "✦ " : ""}{preset.name}
                         </button>
                         <button
                           onClick={() => deletePreset(preset.id)}
@@ -2042,24 +2881,74 @@ export default function TemplateEditor() {
                 </div>
               </div>
 
+              <div style={{ marginBottom: 10 }}>
+                <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 4 }}>Vertical align (within box)</label>
+                <div style={{ display: "flex", gap: 4 }}>
+                  {[["top", "⬆ Top"], ["middle", "↕ Middle"], ["bottom", "⬇ Bottom"]].map(([v, label]) => (
+                    <button key={v} onClick={() => updateText(sel.id, { verticalAlign: v })} style={{ flex: 1, background: (sel.verticalAlign ?? "top") === v ? "#333" : "#1A1A1A", border: "1px solid #444", borderRadius: 6, padding: "5px 0", color: (sel.verticalAlign ?? "top") === v ? "#F5D478" : "#888", fontSize: 12, cursor: "pointer" }}>
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
               <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 4 }}>Content (use {`{name}`} for user's name)</label>
               <textarea
+                ref={contentTaRef}
                 value={localContent}
                 onChange={(e) => {
                   const v = e.target.value;
                   setLocalContent(v);
-                  // Debounce: write to pages state 200ms after last keystroke
+                  setSpanRange(null); // text offsets shifting → leave per-character scope
+                  // Debounce: write to pages state 200ms after last keystroke (remaps spans)
                   if (contentDebounceRef.current) clearTimeout(contentDebounceRef.current);
-                  contentDebounceRef.current = setTimeout(() => updateText(sel.id, { content: v }), 200);
+                  contentDebounceRef.current = setTimeout(() => commitContent(v), 200);
                 }}
+                onSelect={(e) => {
+                  const r = { start: e.target.selectionStart ?? 0, end: e.target.selectionEnd ?? 0 };
+                  contentSelRef.current = r; setContentSel(r);
+                }}
+                onMouseUp={(e) => { const r = { start: e.target.selectionStart ?? 0, end: e.target.selectionEnd ?? 0 }; contentSelRef.current = r; setContentSel(r); }}
+                onKeyUp={(e) => { const r = { start: e.target.selectionStart ?? 0, end: e.target.selectionEnd ?? 0 }; contentSelRef.current = r; setContentSel(r); }}
                 onBlur={(e) => {
                   // Immediate commit on blur so value is always saved before switching pages
                   if (contentDebounceRef.current) clearTimeout(contentDebounceRef.current);
-                  updateText(sel.id, { content: e.target.value });
+                  commitContent(e.target.value);
                 }}
                 rows={4}
-                style={{ width: "100%", background: "#1A1A1A", border: "1px solid #333", borderRadius: 6, padding: 8, color: "#E0E0E0", fontSize: 13, resize: "vertical", marginBottom: 12, fontFamily: "monospace" }}
+                style={{ width: "100%", background: "#1A1A1A", border: "1px solid #333", borderRadius: 6, padding: 8, color: "#E0E0E0", fontSize: 13, resize: "vertical", marginBottom: 8, fontFamily: "monospace" }}
               />
+
+              {/* ── Per-character styling scope bar ─────────────────────────────── */}
+              {spanRange ? (
+                <div style={{ background: "#2A2400", border: "1px solid #F5D478", borderRadius: 6, padding: "8px 10px", marginBottom: 12, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                  <span style={{ fontSize: 12, color: "#F5D478", fontWeight: 600 }}>✦ Styling selection:</span>
+                  <span style={{ fontSize: 12, color: "#E0E0E0", fontFamily: "monospace", background: "#1A1A1A", borderRadius: 4, padding: "1px 6px", maxWidth: 140, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{spanText || "∅"}</span>
+                  <div style={{ flex: 1 }} />
+                  <button onClick={clearActiveSpan} title="Remove this segment's overrides" style={{ background: "#2A0A0A", border: "1px solid #5A1A1A", borderRadius: 4, color: "#FF6B6B", fontSize: 11, padding: "3px 8px", cursor: "pointer" }}>Clear</button>
+                  <button onClick={() => setSpanRange(null)} style={{ background: "#333", border: "1px solid #555", borderRadius: 4, color: "#E0E0E0", fontSize: 11, padding: "3px 8px", cursor: "pointer" }}>Done</button>
+                </div>
+              ) : (
+                <div style={{ marginBottom: 12 }}>
+                  <button
+                    onClick={styleSelection}
+                    title="Select characters in the box above, then click to style just that part"
+                    style={{ width: "100%", background: contentSel.end > contentSel.start ? "#1e3a5f" : "#1A1A1A", border: `1px solid ${contentSel.end > contentSel.start ? "#2563eb" : "#333"}`, borderRadius: 6, padding: "7px 0", color: contentSel.end > contentSel.start ? "#7dd3fc" : "#777", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
+                    ✦ Style selected characters{contentSel.end > contentSel.start ? ` («${(localContent).slice(contentSel.start, contentSel.end).slice(0, 12)}»)` : ""}
+                  </button>
+                  {(sel.spans?.length ?? 0) > 0 && (
+                    <div style={{ marginTop: 6, display: "flex", gap: 4, flexWrap: "wrap", alignItems: "center" }}>
+                      <span style={{ fontSize: 10, color: "#555" }}>Segments:</span>
+                      {(sel.spans ?? []).map((sp, i) => (
+                        <button key={`${sp.start}-${sp.end}-${i}`} onClick={() => setSpanRange({ start: sp.start, end: sp.end })} title={`chars ${sp.start}–${sp.end}`}
+                          style={{ background: "#1A1A1A", border: "1px solid #444", borderRadius: 4, color: "#E0A055", fontSize: 11, padding: "2px 7px", cursor: "pointer", fontFamily: "monospace", maxWidth: 90, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {(sel.content ?? "").slice(sp.start, sp.end) || "∅"}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
 
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 12 }}>
                 <div>
@@ -2111,27 +3000,20 @@ export default function TemplateEditor() {
 
               <div style={{ background: "#151515", borderRadius: 8, padding: 10, marginBottom: 12 }}>
                 <label style={{ fontSize: 11, color: "#888" }}>Box appearance</label>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 6, marginBottom: 8 }}>
-                  <div>
-                    <label style={{ fontSize: 10, color: "#666" }}>Fill color</label>
-                    <input type="color" value={sel.boxFillColor ?? "#0F172A"} onChange={(e) => updateText(sel.id, { boxFillColor: e.target.value })} style={{ width: "100%", height: 28, border: "none", borderRadius: 4, cursor: "pointer" }} />
-                  </div>
-                  <div>
-                    <label style={{ fontSize: 10, color: "#666" }}>{sel.boxFadeEdges ? "Peak opacity" : "Fill opacity"}</label>
-                    <input type="range" min="0" max="1" step="0.05" value={sel.boxFillOpacity ?? 0} onChange={(e) => sliderUpdate(sel.id, { boxFillOpacity: parseFloat(e.target.value) })} style={{ width: "100%", marginTop: 8 }} />
-                  </div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 6, marginBottom: 10 }}>
+                  <Field label="Fill color">
+                    <input type="color" value={sel.boxFillColor ?? "#0F172A"} onChange={(e) => updateText(sel.id, { boxFillColor: e.target.value })} style={{ width: "100%", height: 30, border: "1px solid #333", borderRadius: 6, cursor: "pointer", background: "#1A1A1A", padding: 2 }} />
+                  </Field>
+                  <Field label="Border color">
+                    <input type="color" value={sel.boxBorderColor ?? "#FFFFFF"} onChange={(e) => updateText(sel.id, { boxBorderColor: e.target.value })} style={{ width: "100%", height: 30, border: "1px solid #333", borderRadius: 6, cursor: "pointer", background: "#1A1A1A", padding: 2 }} />
+                  </Field>
                 </div>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
-                  <div>
-                    <label style={{ fontSize: 10, color: "#666" }}>Border color</label>
-                    <input type="color" value={sel.boxBorderColor ?? "#FFFFFF"} onChange={(e) => updateText(sel.id, { boxBorderColor: e.target.value })} style={{ width: "100%", height: 28, border: "none", borderRadius: 4, cursor: "pointer" }} />
-                  </div>
-                  <div>
-                    <label style={{ fontSize: 10, color: "#666" }}>Border opacity</label>
-                    <input type="range" min="0" max="1" step="0.05" value={sel.boxBorderOpacity ?? 0} onChange={(e) => sliderUpdate(sel.id, { boxBorderOpacity: parseFloat(e.target.value) })} style={{ width: "100%", marginTop: 8 }} />
-                  </div>
-                </div>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 6 }}>
+                <SliderRow label={sel.boxFadeEdges ? "Cloud opacity" : "Fill opacity"} value={sel.boxFillOpacity ?? 0} onChange={(e) => sliderUpdate(sel.id, { boxFillOpacity: parseFloat(e.target.value) })} format={(v) => Math.round(v * 100) + "%"} />
+                {sel.boxFadeEdges && (
+                  <SliderRow label="Edge softness" value={sel.boxFeather ?? 30} min={2} max={90} step={1} onChange={(e) => sliderUpdate(sel.id, { boxFeather: parseFloat(e.target.value) })} format={(v) => Math.round(v) + "px"} />
+                )}
+                <SliderRow label="Border opacity" value={sel.boxBorderOpacity ?? 0} onChange={(e) => sliderUpdate(sel.id, { boxBorderOpacity: parseFloat(e.target.value) })} format={(v) => Math.round(v * 100) + "%"} />
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 8 }}>
                   <div>
                     <label style={{ fontSize: 10, color: "#666" }}>Border px</label>
                     <NumericField value={sel.boxBorderWidth ?? 0} onCommit={(value) => updateText(sel.id, { boxBorderWidth: Math.max(0, value) })} min={0} step="0.1" style={{ width: "100%", background: "#1A1A1A", border: "1px solid #333", borderRadius: 4, padding: "3px 6px", color: "#E0E0E0", fontSize: 12 }} />
@@ -2140,17 +3022,41 @@ export default function TemplateEditor() {
                     <label style={{ fontSize: 10, color: "#666" }}>Radius</label>
                     <NumericField value={sel.boxRadius ?? 0} onCommit={(value) => updateText(sel.id, { boxRadius: Math.max(0, value) })} min={0} step="1" style={{ width: "100%", background: "#1A1A1A", border: "1px solid #333", borderRadius: 4, padding: "3px 6px", color: "#E0E0E0", fontSize: 12 }} />
                   </div>
+                </div>
+                {/* Per-side inner padding — distance between the text and the box border */}
+                <label style={{ fontSize: 10, color: "#666", display: "block", marginBottom: 4 }}>Padding · text ↔ border (px)</label>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 6 }}>
                   <div>
-                    <label style={{ fontSize: 10, color: "#666" }}>Pad X</label>
-                    <NumericField value={sel.boxPaddingX ?? 0} onCommit={(value) => updateText(sel.id, { boxPaddingX: Math.max(0, value) })} min={0} step="1" style={{ width: "100%", background: "#1A1A1A", border: "1px solid #333", borderRadius: 4, padding: "3px 6px", color: "#E0E0E0", fontSize: 12 }} />
+                    <label style={{ fontSize: 10, color: "#666" }}>↑ Top</label>
+                    <NumericField value={resolvePad(sel).top} onCommit={(value) => updateText(sel.id, { boxPaddingTop: Math.max(0, value) })} min={0} step="1" style={{ width: "100%", background: "#1A1A1A", border: "1px solid #333", borderRadius: 4, padding: "3px 6px", color: "#E0E0E0", fontSize: 12 }} />
                   </div>
                   <div>
-                    <label style={{ fontSize: 10, color: "#666" }}>Pad Y</label>
-                    <NumericField value={sel.boxPaddingY ?? 0} onCommit={(value) => updateText(sel.id, { boxPaddingY: Math.max(0, value) })} min={0} step="1" style={{ width: "100%", background: "#1A1A1A", border: "1px solid #333", borderRadius: 4, padding: "3px 6px", color: "#E0E0E0", fontSize: 12 }} />
+                    <label style={{ fontSize: 10, color: "#666" }}>→ Right</label>
+                    <NumericField value={resolvePad(sel).right} onCommit={(value) => updateText(sel.id, { boxPaddingRight: Math.max(0, value) })} min={0} step="1" style={{ width: "100%", background: "#1A1A1A", border: "1px solid #333", borderRadius: 4, padding: "3px 6px", color: "#E0E0E0", fontSize: 12 }} />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: 10, color: "#666" }}>↓ Bottom</label>
+                    <NumericField value={resolvePad(sel).bottom} onCommit={(value) => updateText(sel.id, { boxPaddingBottom: Math.max(0, value) })} min={0} step="1" style={{ width: "100%", background: "#1A1A1A", border: "1px solid #333", borderRadius: 4, padding: "3px 6px", color: "#E0E0E0", fontSize: 12 }} />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: 10, color: "#666" }}>← Left</label>
+                    <NumericField value={resolvePad(sel).left} onCommit={(value) => updateText(sel.id, { boxPaddingLeft: Math.max(0, value) })} min={0} step="1" style={{ width: "100%", background: "#1A1A1A", border: "1px solid #333", borderRadius: 4, padding: "3px 6px", color: "#E0E0E0", fontSize: 12 }} />
                   </div>
                 </div>
               </div>
 
+              {/* ── Text style + effects — SCOPE-ROUTED ──────────────────────────────
+                  Everything below writes to the CURRENT scope: the whole box, or just the
+                  selected characters when a span is active. We shadow `sel` (→ merged view)
+                  and the write helpers (`updateText`/`sliderUpdate`/`handleTextureUpload`) so
+                  the existing controls need no changes — they transparently target the scope.
+                  Layout/box/content controls above stay box-only; {name} panel below is separate. */}
+              {(() => {
+                const sel = styleView;
+                const updateText = styleScopeUpdate;
+                const sliderUpdate = styleScopeSlider;
+                const handleTextureUpload = styleScopeTexture;
+                return (<>
               {/* ── Font ──────────────────────────────────────────────────── */}
               <label style={{ fontSize: 11, color: "#888" }}>Font</label>
               <FontPicker
@@ -2185,6 +3091,25 @@ export default function TemplateEditor() {
                   </div>
                 </div>
               )}
+              {recentGradients.length > 0 && (
+                <div style={{ marginBottom: 6 }}>
+                  <div style={{ fontSize: 10, color: "#555", marginBottom: 4 }}>Recent gradients</div>
+                  <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                    {recentGradients.map((g) => {
+                      const active = sel.color === "custom_gradient"
+                        && (sel.customGradientStart ?? "").toUpperCase() === g.start.toUpperCase()
+                        && (sel.customGradientEnd ?? "").toUpperCase() === g.end.toUpperCase()
+                        && (sel.customGradientAngle ?? 180) === g.angle;
+                      return (
+                        <div key={`${g.start}|${g.end}|${g.angle}`}
+                          onClick={() => updateText(sel.id, { color: "custom_gradient", customGradientStart: g.start, customGradientEnd: g.end, customGradientAngle: g.angle })}
+                          title={`${g.start} → ${g.end} @ ${g.angle}°`}
+                          style={{ width: 28, height: 28, borderRadius: 6, background: `linear-gradient(${g.angle}deg, ${g.start}, ${g.end})`, border: active ? "2px solid #F5D478" : "2px solid #444", cursor: "pointer" }} />
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
               <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 8 }}>
                 {COLOR_PRESETS.map((c) => (
                   <div key={c.value} onClick={() => updateText(sel.id, { color: c.value })} title={c.name} style={{ width: 28, height: 28, borderRadius: 6, background: c.preview, border: sel.color === c.value ? "2px solid #F5D478" : "2px solid #333", cursor: "pointer" }} />
@@ -2210,7 +3135,8 @@ export default function TemplateEditor() {
               )}
               {/* Custom gradient editor */}
               {sel.color === "custom_gradient" && (
-                <div style={{ marginBottom: 8 }}>
+                <div style={{ marginBottom: 8 }}
+                  onBlur={() => addRecentGradient({ start: sel.customGradientStart ?? "#FF8C00", end: sel.customGradientEnd ?? "#FFD700", angle: sel.customGradientAngle ?? 180 })}>
                   {/* Preview bar */}
                   <div style={{
                     height: 20, borderRadius: 6, marginBottom: 8,
@@ -2291,15 +3217,28 @@ export default function TemplateEditor() {
                 )}
               </div>
 
+              {/* Font weight — full variable-font range (Thin → Black) */}
+              <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 10 }}>
+                <label style={{ fontSize: 11, color: "#888", width: 48, flexShrink: 0 }}>Weight</label>
+                <select
+                  value={resolveWeight(sel)}
+                  onChange={(e) => { const w = Number(e.target.value); updateText(sel.id, { fontWeight: w, bold: w >= 700 }); }}
+                  style={{ flex: 1, background: "#1A1A1A", border: "1px solid #333", borderRadius: 6, padding: "5px 8px", color: "#E0E0E0", fontSize: 13 }}
+                >
+                  {WEIGHT_OPTIONS.map((w) => (
+                    <option key={w.value} value={w.value}>{w.label} ({w.value})</option>
+                  ))}
+                </select>
+              </div>
               {/* Typography style row — B / I / U + Transform */}
               <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
-                <button onClick={() => updateText(sel.id, { bold: !sel.bold })} title="Bold" style={{ flex: 1, background: sel.bold ? "#2C2400" : "#1A1A1A", border: `1px solid ${sel.bold ? "#F5D478" : "#333"}`, borderRadius: 6, padding: "7px 0", color: sel.bold ? "#F5D478" : "#666", fontSize: 14, cursor: "pointer", fontWeight: "bold" }}>B</button>
+                <button onClick={() => { const w = resolveWeight(sel); updateText(sel.id, { fontWeight: w >= 700 ? 400 : 700, bold: w < 700 }); }} title="Bold (toggle 400↔700)" style={{ flex: 1, background: resolveWeight(sel) >= 700 ? "#2C2400" : "#1A1A1A", border: `1px solid ${resolveWeight(sel) >= 700 ? "#F5D478" : "#333"}`, borderRadius: 6, padding: "7px 0", color: resolveWeight(sel) >= 700 ? "#F5D478" : "#666", fontSize: 14, cursor: "pointer", fontWeight: "bold" }}>B</button>
                 <button onClick={() => updateText(sel.id, { italic: !sel.italic })} title="Italic" style={{ flex: 1, background: sel.italic ? "#2C2400" : "#1A1A1A", border: `1px solid ${sel.italic ? "#F5D478" : "#333"}`, borderRadius: 6, padding: "7px 0", color: sel.italic ? "#F5D478" : "#666", fontSize: 14, cursor: "pointer", fontStyle: "italic" }}>I</button>
                 <button onClick={() => updateText(sel.id, { underline: !sel.underline })} title="Underline" style={{ flex: 1, background: sel.underline ? "#2C2400" : "#1A1A1A", border: `1px solid ${sel.underline ? "#F5D478" : "#333"}`, borderRadius: 6, padding: "7px 0", color: sel.underline ? "#F5D478" : "#666", fontSize: 14, cursor: "pointer", textDecoration: "underline" }}>U</button>
               </div>
               {/* Text Transform row */}
               <div style={{ display: "flex", gap: 6, marginBottom: 16 }}>
-                {[["none","Aa","Normal"],["uppercase","AA","Caps"],["lowercase","aa","lower"],["capitalize","Ab","Title"]].map(([val,lbl,tip]) => (
+                {[["none","Aa","Original (as typed)"],["uppercase","AA","ALL CAPS"],["lowercase","aa","all lowercase"],["capitalize","Ab","Title Case (first letter of each word)"]].map(([val,lbl,tip]) => (
                   <button key={val} onClick={() => updateText(sel.id, { textTransform: val })} title={tip}
                     style={{ flex: 1, background: (sel.textTransform ?? "none") === val ? "#2C2400" : "#1A1A1A", border: `1px solid ${(sel.textTransform ?? "none") === val ? "#F5D478" : "#333"}`, borderRadius: 6, padding: "5px 0", color: (sel.textTransform ?? "none") === val ? "#F5D478" : "#555", fontSize: 11, cursor: "pointer" }}>
                     {lbl}
@@ -2343,13 +3282,7 @@ export default function TemplateEditor() {
                   <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8 }}>
                     <span style={{ fontSize: 10, color: "#F5D478", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em" }}>Shadow</span>
                   </div>
-                  <div style={{ marginBottom: 8 }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                      <label style={{ fontSize: 10, color: "#555" }}>Opacity</label>
-                      <span style={{ fontSize: 10, color: "#888", fontVariantNumeric: "tabular-nums" }}>{Math.round((sel.shadowOpacity ?? 0.5) * 100)}%</span>
-                    </div>
-                    <input type="range" min="0" max="1" step="0.05" value={sel.shadowOpacity ?? 0.5} onChange={(e) => sliderUpdate(sel.id, { shadowOpacity: parseFloat(e.target.value) })} style={{ width: "100%", marginTop: 4, accentColor: "#F5D478" }} />
-                  </div>
+                  <SliderRow label="Opacity" value={sel.shadowOpacity ?? 0.5} onChange={(e) => sliderUpdate(sel.id, { shadowOpacity: parseFloat(e.target.value) })} format={(v) => Math.round(v * 100) + "%"} accent="#F5D478" />
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6, marginBottom: 8 }}>
                     <div>
                       <label style={{ fontSize: 10, color: "#555" }}>Blur</label>
@@ -2375,13 +3308,7 @@ export default function TemplateEditor() {
                   <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8 }}>
                     <span style={{ fontSize: 10, color: "#7EC8E3", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em" }}>Outline</span>
                   </div>
-                  <div style={{ marginBottom: 8 }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                      <label style={{ fontSize: 10, color: "#555" }}>Opacity</label>
-                      <span style={{ fontSize: 10, color: "#888", fontVariantNumeric: "tabular-nums" }}>{Math.round((sel.strokeOpacity ?? 1) * 100)}%</span>
-                    </div>
-                    <input type="range" min="0" max="1" step="0.05" value={sel.strokeOpacity ?? 1} onChange={(e) => sliderUpdate(sel.id, { strokeOpacity: parseFloat(e.target.value) })} style={{ width: "100%", marginTop: 4, accentColor: "#7EC8E3" }} />
-                  </div>
+                  <SliderRow label="Opacity" value={sel.strokeOpacity ?? 1} onChange={(e) => sliderUpdate(sel.id, { strokeOpacity: parseFloat(e.target.value) })} format={(v) => Math.round(v * 100) + "%"} accent="#7EC8E3" />
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 8 }}>
                     <div>
                       <label style={{ fontSize: 10, color: "#555" }}>Width (px)</label>
@@ -2399,13 +3326,7 @@ export default function TemplateEditor() {
               {sel.bevel && (
                 <div style={{ background: "#111", border: "1px solid #2A1A00", borderRadius: 8, padding: 10, marginBottom: 10 }}>
                   <span style={{ fontSize: 10, color: "#E8A055", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", display: "block", marginBottom: 8 }}>3D Bevel</span>
-                  <div style={{ marginBottom: 8 }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                      <label style={{ fontSize: 10, color: "#555" }}>Depth</label>
-                      <span style={{ fontSize: 10, color: "#888", fontVariantNumeric: "tabular-nums" }}>{sel.bevelDepth ?? 4}px</span>
-                    </div>
-                    <input type="range" min="1" max="16" step="1" value={sel.bevelDepth ?? 4} onChange={(e) => sliderUpdate(sel.id, { bevelDepth: parseInt(e.target.value) })} style={{ width: "100%", marginTop: 4, accentColor: "#E8A055" }} />
-                  </div>
+                  <SliderRow label="Depth" value={sel.bevelDepth ?? 4} min={1} max={16} step={1} onChange={(e) => sliderUpdate(sel.id, { bevelDepth: parseInt(e.target.value) })} format={(v) => v + "px"} accent="#E8A055" />
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 8 }}>
                     <div>
                       <label style={{ fontSize: 10, color: "#555" }}>Highlight</label>
@@ -2442,13 +3363,7 @@ export default function TemplateEditor() {
               {sel.glow && (
                 <div style={{ background: "#111", border: "1px solid #2A2200", borderRadius: 8, padding: 10, marginBottom: 10 }}>
                   <span style={{ fontSize: 10, color: "#FFD700", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", display: "block", marginBottom: 8 }}>Glow</span>
-                  <div style={{ marginBottom: 8 }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                      <label style={{ fontSize: 10, color: "#555" }}>Opacity</label>
-                      <span style={{ fontSize: 10, color: "#888", fontVariantNumeric: "tabular-nums" }}>{Math.round((sel.glowOpacity ?? 0.85) * 100)}%</span>
-                    </div>
-                    <input type="range" min="0" max="1" step="0.05" value={sel.glowOpacity ?? 0.85} onChange={(e) => sliderUpdate(sel.id, { glowOpacity: parseFloat(e.target.value) })} style={{ width: "100%", marginTop: 4, accentColor: "#FFD700" }} />
-                  </div>
+                  <SliderRow label="Opacity" value={sel.glowOpacity ?? 0.85} onChange={(e) => sliderUpdate(sel.id, { glowOpacity: parseFloat(e.target.value) })} format={(v) => Math.round(v * 100) + "%"} accent="#FFD700" />
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
                     <div>
                       <label style={{ fontSize: 10, color: "#555" }}>Blur radius</label>
@@ -2461,17 +3376,241 @@ export default function TemplateEditor() {
                   </div>
                 </div>
               )}
+                </>);
+              })()}
 
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 12 }}>
-                <div>
-                  <label style={{ fontSize: 11, color: "#888" }}>Max width (px)</label>
-                  <NumericField value={sel.maxWidth} onCommit={(value) => { const safe = Math.max(MIN_BOX_WIDTH, Math.round(value)); updateText(sel.id, { maxWidth: safe, boxWidth: safe }); }} min={MIN_BOX_WIDTH} step="1" style={{ width: "100%", background: "#1A1A1A", border: "1px solid #333", borderRadius: 6, padding: "4px 8px", color: "#E0E0E0", fontSize: 13 }} />
+              {/* Layer opacity — full-width slider row. (The old "Max width" control was a
+                  duplicate of "Box width", which already writes both boxWidth & maxWidth.)
+                  Stays box-only: opacity multiplies the whole layer (box + text), not a span. */}
+              <SliderRow label="Layer opacity" value={sel.opacity ?? 1} onChange={(e) => sliderUpdate(sel.id, { opacity: parseFloat(e.target.value) })} format={(v) => Math.round((v ?? 1) * 100) + "%"} style={{ marginBottom: 12 }} />
+
+              {/* ── {name} independent style section ─────────────────────────
+                  Only visible when the text content contains {name}           */}
+              {sel.content.includes("{name}") && (
+                <div style={{ marginTop: 4 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+                    <span style={{ fontSize: 11, fontWeight: 600, color: "#666", textTransform: "uppercase", letterSpacing: "0.08em" }}>{"{name}"} Style</span>
+                    <div style={{ flex: 1, height: 1, background: "#222" }} />
+                    <button
+                      onClick={() => {
+                        if (sel.nameStyle?.enabled) {
+                          updateText(sel.id, { nameStyle: null });
+                        } else {
+                          // Initialise with current item's styles as defaults
+                          updateText(sel.id, { nameStyle: {
+                            enabled: true,
+                            font: sel.font, size: sel.size, bold: sel.bold, fontWeight: resolveWeight(sel), italic: sel.italic, letterSpacing: sel.letterSpacing,
+                            textTransform: sel.textTransform ?? "none", textureImage: sel.textureImage ?? null,
+                            color: sel.color, customColor: sel.customColor,
+                            customGradientStart: sel.customGradientStart, customGradientEnd: sel.customGradientEnd, customGradientAngle: sel.customGradientAngle,
+                            shadow: sel.shadow, shadowColor: sel.shadowColor, shadowOpacity: sel.shadowOpacity, shadowBlur: sel.shadowBlur, shadowOffsetX: sel.shadowOffsetX, shadowOffsetY: sel.shadowOffsetY,
+                            stroke: sel.stroke, strokeWidth: sel.strokeWidth, strokeColor: sel.strokeColor, strokeOpacity: sel.strokeOpacity,
+                            bevel: sel.bevel, bevelDepth: sel.bevelDepth, bevelHighlight: sel.bevelHighlight, bevelShadow: sel.bevelShadow,
+                            glow: sel.glow, glowColor: sel.glowColor, glowBlur: sel.glowBlur, glowOpacity: sel.glowOpacity,
+                          }});
+                        }
+                      }}
+                      style={{ background: sel.nameStyle?.enabled ? "#1c1800" : "#1A1A1A", border: `1px solid ${sel.nameStyle?.enabled ? "#F5D478" : "#444"}`, borderRadius: 6, padding: "3px 10px", color: sel.nameStyle?.enabled ? "#F5D478" : "#666", fontSize: 11, cursor: "pointer" }}
+                    >
+                      {sel.nameStyle?.enabled ? "On" : "Off"}
+                    </button>
+                  </div>
+
+                  {sel.nameStyle?.enabled && (() => {
+                    const ns = sel.nameStyle;
+                    const upNs = (patch) => updateText(sel.id, { nameStyle: { ...ns, ...patch } });
+                    const slNs = (patch) => sliderUpdate(sel.id, { nameStyle: { ...ns, ...patch } });
+                    const handleNameTexture = (e) => {
+                      const file = e.target.files?.[0]; if (!file) return;
+                      const reader = new FileReader();
+                      reader.onload = (ev) => { saveHistory("Name texture"); upNs({ textureImage: ev.target.result }); };
+                      reader.readAsDataURL(file); e.target.value = "";
+                    };
+                    return (
+                      <div style={{ background: "#111", borderRadius: 8, padding: 12, border: "1px solid #2a2400" }}>
+
+                        {/* {name} presets — apply a saved preset, or save the current name style */}
+                        <div style={{ marginBottom: 12, paddingBottom: 10, borderBottom: "1px solid #2a2400" }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                            <span style={{ fontSize: 10, color: "#666", flex: 1 }}>Presets for {"{name}"}</span>
+                            {namePresetDraft === null ? (
+                              <button onClick={() => setNamePresetDraft("")} title="Save the current {name} style as a preset"
+                                style={{ background: "#1c1800", border: "1px solid #F5D478", borderRadius: 5, padding: "2px 8px", color: "#F5D478", fontSize: 10, fontWeight: 600, cursor: "pointer" }}>
+                                ＋ Save
+                              </button>
+                            ) : (
+                              <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+                                <input
+                                  autoFocus
+                                  value={namePresetDraft}
+                                  onChange={(e) => setNamePresetDraft(e.target.value)}
+                                  onKeyDown={(e) => { if (e.key === "Enter") confirmSaveNamePreset(); if (e.key === "Escape") setNamePresetDraft(null); }}
+                                  placeholder="Preset name…"
+                                  style={{ width: 110, background: "#1A1A1A", border: "1px solid #F5D478", borderRadius: 5, padding: "2px 6px", color: "#E0E0E0", fontSize: 11 }}
+                                />
+                                <button onClick={confirmSaveNamePreset} style={{ background: "#F5D478", border: "none", borderRadius: 5, padding: "2px 7px", color: "#111", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>✓</button>
+                                <button onClick={() => setNamePresetDraft(null)} style={{ background: "none", border: "none", color: "#888", fontSize: 12, cursor: "pointer", padding: "0 2px" }}>✕</button>
+                              </div>
+                            )}
+                          </div>
+                          {presets.length > 0 && (
+                            <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                              {presets.map((preset) => (
+                                <button
+                                  key={preset.id}
+                                  onClick={() => applyPresetToName(preset)}
+                                  title={`Apply "${preset.name}" font/size/color/effects to {name} only`}
+                                  style={{ background: "#161616", border: `1px solid ${preset.source === "name" ? "#3a3010" : "#2a2a2a"}`, borderRadius: 6, padding: "4px 9px", color: preset.source === "name" ? "#E0C878" : "#C0C0C0", fontSize: 11, cursor: "pointer", maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                                >
+                                  {preset.source === "name" ? "✦ " : ""}{preset.name}
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Font */}
+                        <label style={{ fontSize: 11, color: "#888" }}>Font</label>
+                        <FontPicker value={ns.font ?? sel.font} onChange={(v) => { saveHistory("Name style font"); upNs({ font: v }); }} />
+
+                        {/* Size + Bold/Italic */}
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6, marginBottom: 10 }}>
+                          <div>
+                            <label style={{ fontSize: 11, color: "#888" }}>Size</label>
+                            <NumericField value={ns.size ?? sel.size} onCommit={(v) => upNs({ size: Math.max(1, Math.round(v)) })} min={1} step="1" style={{ width: "100%", background: "#1A1A1A", border: "1px solid #333", borderRadius: 6, padding: "4px 8px", color: "#E0E0E0", fontSize: 13 }} />
+                          </div>
+                          <div>
+                            <label style={{ fontSize: 11, color: "#888" }}>Letter sp.</label>
+                            <NumericField value={ns.letterSpacing ?? 0} onCommit={(v) => upNs({ letterSpacing: v })} step="0.1" style={{ width: "100%", background: "#1A1A1A", border: "1px solid #333", borderRadius: 6, padding: "4px 8px", color: "#E0E0E0", fontSize: 13 }} />
+                          </div>
+                          <div>
+                            <label style={{ fontSize: 11, color: "#888" }}>Style</label>
+                            <div style={{ display: "flex", gap: 3, marginTop: 4 }}>
+                              <button onClick={() => { const w = resolveWeight(ns); upNs({ fontWeight: w >= 700 ? 400 : 700, bold: w < 700 }); }} style={{ flex: 1, background: resolveWeight(ns) >= 700 ? "#2C2400" : "#1A1A1A", border: `1px solid ${resolveWeight(ns) >= 700 ? "#F5D478" : "#333"}`, borderRadius: 4, padding: "4px 0", color: resolveWeight(ns) >= 700 ? "#F5D478" : "#666", fontSize: 13, cursor: "pointer", fontWeight: "bold" }}>B</button>
+                              <button onClick={() => upNs({ italic: !ns.italic })} style={{ flex: 1, background: ns.italic ? "#2C2400" : "#1A1A1A", border: `1px solid ${ns.italic ? "#F5D478" : "#333"}`, borderRadius: 4, padding: "4px 0", color: ns.italic ? "#F5D478" : "#666", fontSize: 13, cursor: "pointer", fontStyle: "italic" }}>I</button>
+                            </div>
+                          </div>
+                          <div>
+                            <label style={{ fontSize: 11, color: "#888" }}>Weight</label>
+                            <select value={resolveWeight(ns)} onChange={(e) => { const w = Number(e.target.value); upNs({ fontWeight: w, bold: w >= 700 }); }}
+                              style={{ width: "100%", marginTop: 4, background: "#1A1A1A", border: "1px solid #333", borderRadius: 6, padding: "4px 6px", color: "#E0E0E0", fontSize: 12 }}>
+                              {WEIGHT_OPTIONS.map((w) => (<option key={w.value} value={w.value}>{w.label} ({w.value})</option>))}
+                            </select>
+                          </div>
+                        </div>
+
+                        {/* Color presets */}
+                        <label style={{ fontSize: 11, color: "#888" }}>Color</label>
+                        <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 8, marginTop: 4 }}>
+                          {COLOR_PRESETS.map((c) => (
+                            <div key={c.value} onClick={() => upNs({ color: c.value })} title={c.name} style={{ width: 24, height: 24, borderRadius: 5, background: c.preview, border: ns.color === c.value ? "2px solid #F5D478" : "2px solid #333", cursor: "pointer" }} />
+                          ))}
+                        </div>
+                        {ns.color === "custom" && (
+                          <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 8 }}>
+                            <input type="color" value={ns.customColor ?? "#FFFFFF"} onChange={(e) => upNs({ customColor: e.target.value })} style={{ width: 32, height: 28, border: "none", borderRadius: 5, cursor: "pointer" }} />
+                            <input type="text" value={(ns.customColor ?? "#FFFFFF").toUpperCase()} maxLength={7}
+                              onChange={(e) => { if (/^#[0-9A-Fa-f]{0,6}$/.test(e.target.value)) upNs({ customColor: e.target.value }); }}
+                              style={{ flex: 1, background: "#1A1A1A", border: "1px solid #333", borderRadius: 5, padding: "4px 8px", color: "#E0E0E0", fontSize: 12, fontFamily: "monospace" }} />
+                          </div>
+                        )}
+                        {ns.color === "custom_gradient" && (
+                          <div style={{ marginBottom: 8 }}>
+                            <div style={{ height: 16, borderRadius: 4, marginBottom: 6, background: `linear-gradient(${ns.customGradientAngle ?? 180}deg, ${ns.customGradientStart ?? "#FF8C00"}, ${ns.customGradientEnd ?? "#FFD700"})`, border: "1px solid #333" }} />
+                            <div style={{ display: "flex", gap: 6 }}>
+                              <input type="color" value={ns.customGradientStart ?? "#FF8C00"} onChange={(e) => upNs({ customGradientStart: e.target.value })} style={{ flex: 1, height: 28, border: "none", borderRadius: 4, cursor: "pointer" }} />
+                              <input type="color" value={ns.customGradientEnd ?? "#FFD700"} onChange={(e) => upNs({ customGradientEnd: e.target.value })} style={{ flex: 1, height: 28, border: "none", borderRadius: 4, cursor: "pointer" }} />
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Case (textTransform) — independent for {name}; e.g. "AA" → name uppercased */}
+                        <label style={{ fontSize: 11, color: "#888", display: "block", marginTop: 4, marginBottom: 4 }}>Case</label>
+                        <div style={{ display: "flex", gap: 4, marginBottom: 10 }}>
+                          {[["none","Aa","Original (as typed)"],["uppercase","AA","ALL CAPS"],["lowercase","aa","all lowercase"],["capitalize","Ab","Title Case"]].map(([val,lbl,tip]) => (
+                            <button key={val} onClick={() => upNs({ textTransform: val })} title={tip}
+                              style={{ flex: 1, background: (ns.textTransform ?? "none") === val ? "#2C2400" : "#1A1A1A", border: `1px solid ${(ns.textTransform ?? "none") === val ? "#F5D478" : "#333"}`, borderRadius: 6, padding: "5px 0", color: (ns.textTransform ?? "none") === val ? "#F5D478" : "#555", fontSize: 11, cursor: "pointer" }}>
+                              {lbl}
+                            </button>
+                          ))}
+                        </div>
+
+                        {/* Texture fill — independent for {name} */}
+                        <label style={{ fontSize: 11, color: "#888", display: "block", marginBottom: 4 }}>Texture fill</label>
+                        <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 10 }}>
+                          {ns.textureImage ? (
+                            <>
+                              <div style={{ width: 46, height: 28, borderRadius: 6, backgroundImage: `url(${ns.textureImage})`, backgroundSize: "cover", backgroundPosition: "center", border: "1px solid #555", flexShrink: 0 }} />
+                              <span style={{ fontSize: 11, color: "#aaa", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>Texture active</span>
+                              <button onClick={() => { saveHistory("Remove name texture"); upNs({ textureImage: null }); }} style={{ background: "#2A1A1A", border: "1px solid #553333", borderRadius: 6, padding: "4px 10px", color: "#FF8888", fontSize: 11, cursor: "pointer", flexShrink: 0 }}>Remove</button>
+                            </>
+                          ) : (
+                            <label style={{ flex: 1, background: "#1A1A1A", border: "1px dashed #444", borderRadius: 6, padding: "6px 12px", color: "#888", fontSize: 12, cursor: "pointer", textAlign: "center" }}>
+                              + Upload texture image
+                              <input type="file" accept="image/*" onChange={handleNameTexture} style={{ display: "none" }} />
+                            </label>
+                          )}
+                        </div>
+
+                        {/* Effects */}
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginTop: 4 }}>
+                          {[
+                            { key: "shadow", label: "Shadow",   icon: "🌑" },
+                            { key: "stroke", label: "Outline",  icon: "⬡" },
+                            { key: "bevel",  label: "3D Bevel", icon: "🔲" },
+                            { key: "glow",   label: "Glow",     icon: "✨" },
+                          ].map(({ key, label, icon }) => (
+                            <button key={key} onClick={() => upNs({ [key]: !ns[key] })}
+                              style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 3, padding: "8px 4px", background: ns[key] ? "#1C1800" : "#161616", border: `1.5px solid ${ns[key] ? "#F5D478" : "#2A2A2A"}`, borderRadius: 7, cursor: "pointer" }}>
+                              <span style={{ fontSize: 14 }}>{icon}</span>
+                              <span style={{ fontSize: 10, color: ns[key] ? "#F5D478" : "#555" }}>{label}</span>
+                            </button>
+                          ))}
+                        </div>
+
+                        {ns.shadow && (
+                          <div style={{ marginTop: 8 }}>
+                            <SliderRow label="Opacity" value={ns.shadowOpacity ?? 0.5} onChange={(e) => slNs({ shadowOpacity: parseFloat(e.target.value) })} format={(v) => Math.round(v * 100) + "%"} />
+                            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6, marginBottom: 6 }}>
+                              <Field label="Blur"><NumericField value={ns.shadowBlur ?? 8} onCommit={(v) => upNs({ shadowBlur: Math.max(0, v) })} min={0} step="0.1" style={{ width: "100%", boxSizing: "border-box", background: "#1A1A1A", border: "1px solid #333", borderRadius: 4, padding: "4px 6px", color: "#E0E0E0", fontSize: 12 }} /></Field>
+                              <Field label="X"><NumericField value={ns.shadowOffsetX ?? 2} onCommit={(v) => upNs({ shadowOffsetX: v })} step="0.1" style={{ width: "100%", boxSizing: "border-box", background: "#1A1A1A", border: "1px solid #333", borderRadius: 4, padding: "4px 6px", color: "#E0E0E0", fontSize: 12 }} /></Field>
+                              <Field label="Y"><NumericField value={ns.shadowOffsetY ?? 4} onCommit={(v) => upNs({ shadowOffsetY: v })} step="0.1" style={{ width: "100%", boxSizing: "border-box", background: "#1A1A1A", border: "1px solid #333", borderRadius: 4, padding: "4px 6px", color: "#E0E0E0", fontSize: 12 }} /></Field>
+                            </div>
+                            <Field label="Color"><input type="color" value={ns.shadowColor ?? "#000000"} onChange={(e) => upNs({ shadowColor: e.target.value })} style={{ width: "100%", height: 28, border: "1px solid #333", borderRadius: 4, cursor: "pointer", background: "#1A1A1A", padding: 2 }} /></Field>
+                          </div>
+                        )}
+
+                        {ns.stroke && (
+                          <div style={{ marginTop: 8, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+                            <Field label="Width (px)"><NumericField value={ns.strokeWidth ?? 4} onCommit={(v) => upNs({ strokeWidth: Math.max(0.5, v) })} min={0.5} step="0.5" style={{ width: "100%", boxSizing: "border-box", background: "#1A1A1A", border: "1px solid #333", borderRadius: 4, padding: "4px 6px", color: "#E0E0E0", fontSize: 12 }} /></Field>
+                            <Field label="Color"><input type="color" value={ns.strokeColor ?? "#000000"} onChange={(e) => upNs({ strokeColor: e.target.value })} style={{ width: "100%", height: 28, border: "1px solid #333", borderRadius: 4, cursor: "pointer", background: "#1A1A1A", padding: 2 }} /></Field>
+                          </div>
+                        )}
+
+                        {ns.bevel && (
+                          <div style={{ marginTop: 8 }}>
+                            <SliderRow label="Depth" value={ns.bevelDepth ?? 4} min={1} max={16} step={1} onChange={(e) => slNs({ bevelDepth: parseInt(e.target.value) })} format={(v) => v + "px"} accent="#E8A055" />
+                            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+                              <Field label="Highlight"><input type="color" value={ns.bevelHighlight ?? "#FFFFFF"} onChange={(e) => upNs({ bevelHighlight: e.target.value })} style={{ width: "100%", height: 28, border: "1px solid #333", borderRadius: 4, cursor: "pointer", background: "#1A1A1A", padding: 2 }} /></Field>
+                              <Field label="Shadow"><input type="color" value={ns.bevelShadow ?? "#000000"} onChange={(e) => upNs({ bevelShadow: e.target.value })} style={{ width: "100%", height: 28, border: "1px solid #333", borderRadius: 4, cursor: "pointer", background: "#1A1A1A", padding: 2 }} /></Field>
+                            </div>
+                          </div>
+                        )}
+
+                        {ns.glow && (
+                          <div style={{ marginTop: 8 }}>
+                            <SliderRow label="Opacity" value={ns.glowOpacity ?? 0.85} onChange={(e) => slNs({ glowOpacity: parseFloat(e.target.value) })} format={(v) => Math.round(v * 100) + "%"} />
+                            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+                              <Field label="Blur"><NumericField value={ns.glowBlur ?? 20} onCommit={(v) => upNs({ glowBlur: Math.max(1, v) })} min={1} max={80} step="1" style={{ width: "100%", boxSizing: "border-box", background: "#1A1A1A", border: "1px solid #333", borderRadius: 4, padding: "4px 6px", color: "#E0E0E0", fontSize: 12 }} /></Field>
+                              <Field label="Color"><input type="color" value={ns.glowColor ?? "#FFD700"} onChange={(e) => upNs({ glowColor: e.target.value })} style={{ width: "100%", height: 28, border: "1px solid #333", borderRadius: 4, cursor: "pointer", background: "#1A1A1A", padding: 2 }} /></Field>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
                 </div>
-                <div>
-                  <label style={{ fontSize: 11, color: "#888" }}>Opacity</label>
-                  <input type="range" min="0" max="1" step="0.05" value={sel.opacity} onChange={(e) => sliderUpdate(sel.id, { opacity: parseFloat(e.target.value) })} style={{ width: "100%", marginTop: 8 }} />
-                </div>
-              </div>
+              )}
 
             </>
           ) : (
@@ -2481,6 +3620,25 @@ export default function TemplateEditor() {
           )}
         </div>
       </div>
+
+      {/* Preset-apply undo toast — lets the user revert an accidental preset click */}
+      {presetUndo && (
+        <div style={{ position: "fixed", bottom: 24, left: 24, background: "#141414", border: "1px solid #3a3000", borderRadius: 10, padding: "10px 12px 10px 16px", zIndex: 9999, display: "flex", alignItems: "center", gap: 14, boxShadow: "0 8px 32px rgba(0,0,0,0.6)" }}>
+          <span style={{ fontSize: 13, color: "#C0C0C0" }}>
+            Applied <b style={{ color: "#F5D478" }}>{presetUndo.name}</b>
+            {presetUndo.scope === "name" && <span style={{ color: "#888" }}> to {"{name}"}</span>}
+          </span>
+          <button
+            onClick={undoPresetApply}
+            style={{ background: "#F5D478", border: "none", borderRadius: 6, padding: "5px 14px", color: "#111", fontSize: 12, fontWeight: 700, cursor: "pointer" }}
+          >Undo</button>
+          <button
+            onClick={() => { setPresetUndo(null); if (presetUndoTimerRef.current) clearTimeout(presetUndoTimerRef.current); }}
+            title="Dismiss"
+            style={{ background: "none", border: "none", color: "#666", fontSize: 16, cursor: "pointer", lineHeight: 1, padding: "0 2px" }}
+          >✕</button>
+        </div>
+      )}
 
       {/* Batch export progress toast — persists outside the export modal */}
       {batchExporting && (
